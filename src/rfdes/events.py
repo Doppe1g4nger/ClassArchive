@@ -6,6 +6,7 @@ These are plain data carriers. They do not execute themselves; the
 
 from __future__ import annotations
 
+import copy as _copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -24,8 +25,27 @@ DEFAULT_IQ_DTYPE = np.complex64
 SIGNAL_RX = "signalRX"
 
 
+class DataObject:
+    """Base class for any typed data object that flows between components.
+
+    Concrete payloads (e.g. :class:`SignalPayload`, ``PulseBuffer``,
+    ``Spectrogram``) subclass this and are frozen dataclasses carrying, by
+    convention, a ``start_time: float`` and a ``metadata: dict`` field. Subtyping
+    is what the pre-simulation type check keys off: a producer's ``produces``
+    type is accepted by a downstream port if it is the accepted type or a
+    subclass of it.
+
+    Treat instances as read-only. :meth:`copy` returns a deep, independent copy
+    (arrays included) so fan-out branches cannot alias each other's buffers.
+    """
+
+    def copy(self) -> "DataObject":
+        """Return a deep, independent copy (numpy arrays are duplicated)."""
+        return _copy.deepcopy(self)
+
+
 @dataclass(frozen=True)
-class SignalPayload:
+class SignalPayload(DataObject):
     """An immutable buffer of IQ samples flowing between components.
 
     Treat instances as read-only. Component transforms should return a *new*
@@ -65,6 +85,6 @@ class Event:
     time: float
     seq: int
     target: "Component" = field(compare=False)
-    payload: SignalPayload = field(compare=False)
+    payload: DataObject = field(compare=False)
     kind: str = field(default=SIGNAL_RX, compare=False)
     extra: Any = field(default=None, compare=False)

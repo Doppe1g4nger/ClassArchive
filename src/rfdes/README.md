@@ -90,6 +90,51 @@ class Gain(Component):
 
 Return `None` from `on_signal` to make a terminal sink.
 
+## Multiple data types, validation, and merging
+
+Components can exchange **different data types**, not just IQ. Every concrete
+payload subclasses `DataObject` (e.g. `SignalPayload`, `PulseBuffer`,
+`Spectrogram`, `DetectionReport`). A component declares the types it `accepts`
+and the type it `produces`:
+
+```python
+from rfdes import Component
+from rfdes.datatypes import PulseBuffer
+
+class PulseDetector(Component):
+    accepts = (SignalPayload,)
+    produces = PulseBuffer
+    def on_signal(self, payload):
+        ...  # return a PulseBuffer
+```
+
+**Pre-simulation type check.** `RFSystem.validate()` walks every connection and
+raises a `TypeCheckError` (listing *all* problems) if a producer's `produces`
+type isn't accepted at the downstream port, if the entry can't accept
+`SignalPayload`, or if a merge port is left unfed. It runs automatically on the
+first `signalRX`, and you can call it explicitly.
+
+**Merge / join.** Subclass `MergeComponent` to fire only once *every* input port
+has data. Declare named ports in `inputs`, wire producers to them with
+`subscribe(merge, port="...")`, and implement `on_merge(inputs)`:
+
+```python
+from rfdes import MergeComponent
+from rfdes.datatypes import PulseBuffer, Spectrogram, DetectionReport
+
+class DetectionFusion(MergeComponent):
+    inputs = {"pulses": (PulseBuffer,), "spectrogram": (Spectrogram,)}
+    produces = DetectionReport
+    def on_merge(self, inputs):
+        ...  # combine inputs["pulses"] and inputs["spectrogram"]
+
+pulse_det.subscribe(fusion, port="pulses")
+spectro.subscribe(fusion, port="spectrogram")
+```
+
+By default a merge does a FIFO *zip* (one item per port). Override
+`correlation_key(data)` to instead match items that share a key.
+
 ## Examples & tests
 
 ```bash
@@ -97,4 +142,5 @@ pip install -e ".[dev]"
 pytest
 python examples/demo_chain.py
 python examples/demo_fanout.py
+python examples/demo_multitype.py   # multiple data types + validation + merge
 ```

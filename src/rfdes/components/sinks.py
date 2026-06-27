@@ -7,28 +7,33 @@ from typing import Optional
 import numpy as np
 
 from ..component import Component
-from ..events import SignalPayload
+from ..events import DataObject, SignalPayload
 
 
 class Recorder(Component):
-    """Capture every payload it receives. A terminal sink (forwards nothing).
+    """Capture every data object it receives. A terminal sink (forwards nothing).
 
-    Inspect :attr:`records` after running the simulation. Each entry pairs the
-    receive time (set by the caller, typically ``scheduler.now()``) with the
-    payload, but the simplest use is to read ``recorder.payloads``.
+    Accepts any :class:`~rfdes.events.DataObject` so it can terminate chains of
+    any data type. Inspect ``recorder.payloads`` after running the simulation.
     """
+
+    accepts = (DataObject,)
+    produces = None
 
     def __init__(self, name: str, processing_delay: float = 0.0) -> None:
         super().__init__(name, processing_delay)
-        self.payloads: list[SignalPayload] = []
+        self.payloads: list[DataObject] = []
 
-    def on_signal(self, payload: SignalPayload) -> Optional[SignalPayload]:
+    def on_signal(self, payload: DataObject) -> Optional[DataObject]:
         self.payloads.append(payload)
         return None  # terminal sink
 
 
 class SpectrumAnalyzer(Component):
     """Capture payloads and compute their power spectrum on demand. Terminal sink."""
+
+    accepts = (SignalPayload,)
+    produces = None
 
     def __init__(self, name: str, processing_delay: float = 0.0) -> None:
         super().__init__(name, processing_delay)

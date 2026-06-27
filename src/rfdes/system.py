@@ -11,9 +11,17 @@ from typing import Optional
 
 import numpy as np
 
-from .component import Component
+from .component import DEFAULT_PORT, Component, MergeComponent
 from .events import DEFAULT_IQ_DTYPE, SignalPayload
 from .scheduler import Scheduler
+
+
+class TypeCheckError(Exception):
+    """Raised when an RF system's wiring carries incompatible data types.
+
+    Aggregates every problem found during :meth:`RFSystem.validate` into a single
+    message so the user can fix the whole graph at once.
+    """
 
 
 class RFSystem:
@@ -29,11 +37,13 @@ class RFSystem:
         self.scheduler = scheduler
         self.entry: Optional[Component] = None
         self._components: list[Component] = []
+        self._validated = False
 
     def add(self, component: Component) -> Component:
         """Register ``component`` and bind it to the scheduler. Returns it."""
         component.bind(self.scheduler)
         self._components.append(component)
+        self._validated = False
         return component
 
     def set_entry(self, component: Component) -> Component:
@@ -41,11 +51,76 @@ class RFSystem:
         if component not in self._components:
             self.add(component)
         self.entry = component
+        self._validated = False
         return component
 
     @property
     def components(self) -> tuple[Component, ...]:
         return tuple(self._components)
+
+    def validate(self) -> None:
+        """Type-check the wiring; raise :class:`TypeCheckError` on any problem.
+
+        Every connection is checked so that a producer's :attr:`Component.produces`
+        type is accepted (by subclass) at the downstream port it feeds. Also
+        verifies the entry accepts ``SignalPayload`` and that every merge port has
+        a producer (an unfed merge port would never fire). Successful validation is
+        cached; :meth:`add` / :meth:`set_entry` invalidate the cache.
+        """
+        errors: list[str] = []
+
+        for comp in self._components:
+            edges = comp.connections
+            if edges and comp.produces is None:
+                errors.append(
+                    f"{comp.name!r} is a sink (produces nothing) but has "
+                    f"{len(edges)} subscriber(s)"
+                )
+            for sub, port in edges:
+                ports = sub.input_ports()
+                if port not in ports:
+                    errors.append(
+                        f"{comp.name!r} -> {sub.name!r}: unknown input port "
+                        f"{port!r} (known: {tuple(ports)})"
+                    )
+                    continue
+                if comp.produces is None:
+                    continue  # already reported above
+                accepted = ports[port]
+                if not issubclass(comp.produces, tuple(accepted)):
+                    accepted_names = ", ".join(t.__name__ for t in accepted)
+                    errors.append(
+                        f"{comp.name!r} -> {sub.name!r} (port {port!r}): produces "
+                        f"{comp.produces.__name__} but port accepts {accepted_names}"
+                    )
+
+        if self.entry is not None:
+            entry_ports = self.entry.input_ports()
+            accepted = entry_ports.get(DEFAULT_PORT, ())
+            if not (accepted and issubclass(SignalPayload, tuple(accepted))):
+                errors.append(
+                    f"entry {self.entry.name!r} must accept SignalPayload on its "
+                    f"{DEFAULT_PORT!r} port (signalRX delivers SignalPayload)"
+                )
+
+        fed: dict[int, set[str]] = {}
+        for comp in self._components:
+            for sub, port in comp.connections:
+                fed.setdefault(id(sub), set()).add(port)
+        for comp in self._components:
+            if isinstance(comp, MergeComponent):
+                missing = set(comp.inputs) - fed.get(id(comp), set())
+                if missing:
+                    errors.append(
+                        f"merge {comp.name!r} has unfed input port(s) "
+                        f"{sorted(missing)}; it would never fire"
+                    )
+
+        if errors:
+            raise TypeCheckError(
+                "RF system failed type validation:\n  - " + "\n  - ".join(errors)
+            )
+        self._validated = True
 
     def on_signal_rx(
         self,
@@ -72,6 +147,9 @@ class RFSystem:
         """
         if self.entry is None:
             raise RuntimeError("no entry component set; call set_entry() first")
+
+        if not self._validated:
+            self.validate()  # runtime type check before the first event runs
 
         arr = np.asarray(iq)
         if not np.iscomplexobj(arr):

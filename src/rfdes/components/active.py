@@ -16,6 +16,9 @@ class Amplifier(Component):
     A low-noise amplifier (LNA) is just an ``Amplifier`` with a small delay.
     """
 
+    accepts = (SignalPayload,)
+    produces = SignalPayload
+
     def __init__(self, name: str, gain_db: float, processing_delay: float = 0.0) -> None:
         super().__init__(name, processing_delay)
         self.gain_db = gain_db
@@ -32,6 +35,9 @@ class Mixer(Component):
 
     The output ``center_freq`` is shifted down by ``lo_freq`` (downconversion).
     """
+
+    accepts = (SignalPayload,)
+    produces = SignalPayload
 
     def __init__(self, name: str, lo_freq: float, processing_delay: float = 0.0) -> None:
         super().__init__(name, processing_delay)
@@ -50,6 +56,9 @@ class ADC(Component):
     Models the analog-to-digital boundary: real and imaginary parts are clipped
     to ``[-full_scale, full_scale]`` and rounded to ``2**bits`` levels.
     """
+
+    accepts = (SignalPayload,)
+    produces = SignalPayload
 
     def __init__(
         self,

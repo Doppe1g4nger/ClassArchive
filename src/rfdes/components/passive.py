@@ -14,6 +14,9 @@ from ..events import SignalPayload
 class Attenuator(Component):
     """Reduce signal amplitude by a fixed loss in dB."""
 
+    accepts = (SignalPayload,)
+    produces = SignalPayload
+
     def __init__(self, name: str, loss_db: float, processing_delay: float = 0.0) -> None:
         super().__init__(name, processing_delay)
         self.loss_db = loss_db
@@ -31,6 +34,9 @@ class Splitter(Component):
     The framework already fans out to all subscribers; ``Splitter`` simply
     forwards the payload. Set ``loss_db`` to model insertion/split loss.
     """
+
+    accepts = (SignalPayload,)
+    produces = SignalPayload
 
     def __init__(self, name: str, loss_db: float = 0.0, processing_delay: float = 0.0) -> None:
         super().__init__(name, processing_delay)
@@ -50,6 +56,9 @@ class Filter(Component):
     Frequencies outside ``[center_freq - bandwidth/2, center_freq + bandwidth/2]``
     (relative to the payload's center frequency / baseband) are zeroed.
     """
+
+    accepts = (SignalPayload,)
+    produces = SignalPayload
 
     def __init__(
         self,

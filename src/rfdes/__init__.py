@@ -20,20 +20,27 @@ Example::
     sys.set_entry(lna)
 """
 
-from .component import Component
-from .events import SIGNAL_RX, DEFAULT_IQ_DTYPE, Event, SignalPayload
+from .component import Component, MergeComponent
+from .datatypes import DetectionReport, PulseBuffer, Spectrogram
+from .events import SIGNAL_RX, DEFAULT_IQ_DTYPE, DataObject, Event, SignalPayload
 from .scheduler import HeapScheduler, Scheduler
-from .system import RFSystem
+from .system import RFSystem, TypeCheckError
 
 __version__ = "0.1.0"
 
 __all__ = [
     "Component",
+    "MergeComponent",
     "Event",
+    "DataObject",
     "SignalPayload",
+    "PulseBuffer",
+    "Spectrogram",
+    "DetectionReport",
     "SIGNAL_RX",
     "DEFAULT_IQ_DTYPE",
     "Scheduler",
     "HeapScheduler",
     "RFSystem",
+    "TypeCheckError",
 ]
