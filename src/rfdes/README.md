@@ -135,6 +135,35 @@ spectro.subscribe(fusion, port="spectrogram")
 By default a merge does a FIFO *zip* (one item per port). Override
 `correlation_key(data)` to instead match items that share a key.
 
+Wire merges with `>>` by targeting a named port via `component[port]`:
+
+```python
+lna >> split
+split >> pulse_det
+split >> spectro
+pulse_det >> fusion["pulses"]        # -> the merge's "pulses" port
+spectro   >> fusion["spectrogram"]   # -> the merge's "spectrogram" port
+fusion >> recorder
+```
+
+## Dynamic (data-dependent) delays
+
+`processing_delay` may be a constant **or a callable**. The callable is invoked
+with the component's *input* (for a merge, the matched `{port: data}` dict) and
+returns the delay for that firing — so latency can depend on the data or be
+random. Ready-made factories live in `rfdes.delays`:
+
+```python
+from rfdes.delays import per_sample, per_pulse, jitter
+
+Amplifier("lna", gain_db=20, processing_delay=jitter(5e-9, 1e-9))           # random
+PulseDetector("pd", threshold=0.5, processing_delay=per_sample(1e-9, 1e-11)) # ~ IQ length
+PulseRelay("relay", processing_delay=per_pulse(1e-9, 5e-10))                 # ~ #pulses
+```
+
+Any `callable(input) -> float` works; the delay is resolved once per firing
+(so fan-out branches share one consistent value) and must be non-negative.
+
 ## Examples & tests
 
 ```bash
@@ -142,5 +171,7 @@ pip install -e ".[dev]"
 pytest
 python examples/demo_chain.py
 python examples/demo_fanout.py
-python examples/demo_multitype.py   # multiple data types + validation + merge
+python examples/demo_multitype.py          # multiple data types + validation + merge
+python examples/demo_split_merge_rshift.py # split + merge wired with >>
+python examples/demo_dynamic_delay.py      # data-dependent and random delays
 ```

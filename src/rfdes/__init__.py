@@ -20,6 +20,7 @@ Example::
     sys.set_entry(lna)
 """
 
+from . import delays
 from .component import Component, MergeComponent
 from .datatypes import DetectionReport, PulseBuffer, Spectrogram
 from .events import SIGNAL_RX, DEFAULT_IQ_DTYPE, DataObject, Event, SignalPayload
@@ -31,6 +32,7 @@ __version__ = "0.1.0"
 __all__ = [
     "Component",
     "MergeComponent",
+    "delays",
     "Event",
     "DataObject",
     "SignalPayload",

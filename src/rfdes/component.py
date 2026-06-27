@@ -16,13 +16,35 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any, Callable, Optional, Union
 
 from .events import DataObject, SignalPayload
 from .scheduler import Scheduler
 
 #: The implicit input port name used by ordinary single-input components.
 DEFAULT_PORT = "in"
+
+#: A processing delay: a constant, or a callable computing the delay from the
+#: component's input (for ordinary components) or the matched ``{port: data}``
+#: dict (for :class:`MergeComponent`).
+DelaySpec = Union[float, Callable[[Any], float]]
+
+
+class _PortRef:
+    """A reference to a specific input port of a component.
+
+    Produced by ``component[port]`` so a merge's named ports can be wired with
+    the ``>>`` operator: ``producer >> merge["pulses"]``.
+    """
+
+    __slots__ = ("component", "port")
+
+    def __init__(self, component: "Component", port: str) -> None:
+        self.component = component
+        self.port = port
+
+    def __repr__(self) -> str:  # pragma: no cover - cosmetic
+        return f"{self.component.name!r}[{self.port!r}]"
 
 
 class Component:
@@ -41,15 +63,17 @@ class Component:
     Args:
         name: Human-readable identifier, used in diagnostics.
         processing_delay: Latency this component adds, in host-clock units.
-            Charged on emit: outputs reach subscribers ``processing_delay``
-            after this component receives its input.
+            Charged on emit: outputs reach subscribers this many units after the
+            component receives its input. May be a constant, or a callable that
+            computes the delay from the component's input (e.g. delay growing
+            with IQ length or pulse count, or random jitter around a mean).
     """
 
     accepts: tuple[type, ...] = (SignalPayload,)
     produces: Optional[type] = SignalPayload
 
-    def __init__(self, name: str, processing_delay: float = 0.0) -> None:
-        if processing_delay < 0:
+    def __init__(self, name: str, processing_delay: DelaySpec = 0.0) -> None:
+        if not callable(processing_delay) and processing_delay < 0:
             raise ValueError("processing_delay must be non-negative")
         self.name = name
         self.processing_delay = processing_delay
@@ -80,9 +104,20 @@ class Component:
         self._subscribers.append((downstream, port))
         return downstream
 
-    def __rshift__(self, downstream: "Component") -> "Component":
-        """``a >> b`` is sugar for ``a.subscribe(b)`` on the default port."""
+    def __rshift__(self, downstream: Union["Component", _PortRef]) -> "Component":
+        """``a >> b`` is sugar for ``a.subscribe(b)``.
+
+        ``b`` may be a component (delivered to its default port) or a port
+        reference from ``component[port]`` (e.g. ``a >> merge["pulses"]``). Either
+        way the downstream component is returned so chains can continue.
+        """
+        if isinstance(downstream, _PortRef):
+            return self.subscribe(downstream.component, downstream.port)
         return self.subscribe(downstream)
+
+    def __getitem__(self, port: str) -> _PortRef:
+        """``component[port]`` -> a port reference usable with ``>>``."""
+        return _PortRef(self, port)
 
     @property
     def subscribers(self) -> tuple["Component", ...]:
@@ -112,7 +147,7 @@ class Component:
         """
         result = self.on_signal(data)
         if result is not None:
-            self._emit(result)
+            self._emit(result, trigger=data)
 
     def on_signal(self, data: DataObject) -> Optional[DataObject]:
         """Transform an incoming data object. Override in subclasses.
@@ -122,14 +157,34 @@ class Component:
         """
         return data
 
-    def _emit(self, data: DataObject) -> None:
+    def _resolve_delay(self, trigger: Any) -> float:
+        """Resolve this component's processing delay for one firing.
+
+        ``trigger`` is the component's input (for ordinary components) or the
+        matched ``{port: data}`` dict (for a merge); a callable
+        ``processing_delay`` is invoked with it. Raises ``ValueError`` on a
+        negative result.
+        """
+        spec = self.processing_delay
+        delay = float(spec(trigger)) if callable(spec) else float(spec)
+        if delay < 0:
+            raise ValueError(
+                f"component {self.name!r} produced a negative processing delay "
+                f"({delay}); delays must be non-negative"
+            )
+        return delay
+
+    def _emit(self, data: DataObject, trigger: Any = None) -> None:
         """Schedule delivery of ``data`` to each subscriber after the delay."""
         if self._scheduler is None:
             raise RuntimeError(
                 f"component {self.name!r} is not bound to a scheduler; "
                 "add it to an RFSystem (or call bind()) before running"
             )
-        out = replace(data, start_time=data.start_time + self.processing_delay)
+        # Resolve the (possibly data-dependent or random) delay once per firing
+        # so every fan-out branch sees the same, consistent latency.
+        delay = self._resolve_delay(trigger if trigger is not None else data)
+        out = replace(data, start_time=data.start_time + delay)
         multi = len(self._subscribers) > 1
         for sub, port in self._subscribers:
             # Give each subscriber an independent copy so fan-out branches cannot
@@ -139,7 +194,7 @@ class Component:
             # default-arg binding pins the loop variables, avoiding the
             # late-binding closure bug.
             self._scheduler.schedule(
-                self.processing_delay,
+                delay,
                 lambda s=sub, pt=port, p=payload: s.receive(p, pt),
             )
 
@@ -164,7 +219,7 @@ class MergeComponent(Component):
     #: Port name -> accepted data types. Subclasses must override.
     inputs: dict[str, tuple[type, ...]] = {}
 
-    def __init__(self, name: str, processing_delay: float = 0.0) -> None:
+    def __init__(self, name: str, processing_delay: DelaySpec = 0.0) -> None:
         super().__init__(name, processing_delay)
         if not self.inputs:
             raise ValueError(
@@ -190,7 +245,8 @@ class MergeComponent(Component):
         if group is not None:
             result = self.on_merge(group)
             if result is not None:
-                self._emit(result)
+                # A merge's delay callable sees the matched {port: data} dict.
+                self._emit(result, trigger=group)
 
     def _find_ready_group(self) -> Optional[dict[str, DataObject]]:
         """Return one item per port (and remove them) once a full set is ready."""
