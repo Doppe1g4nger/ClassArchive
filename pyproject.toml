@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "rfdes"
+version = "0.1.0"
+description = "Component-level discrete-event simulation framework for RF systems"
+readme = "src/rfdes/README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Daniel Dopp" }]
+keywords = ["rf", "discrete-event-simulation", "iq", "sdr", "signal-processing"]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rfdes"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
