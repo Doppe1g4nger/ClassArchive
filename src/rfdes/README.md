@@ -135,6 +135,26 @@ spectro.subscribe(fusion, port="spectrogram")
 By default a merge does a FIFO *zip* (one item per port). Override
 `correlation_key(data)` to instead match items that share a key.
 
+## Closed-loop feedback (control port)
+
+A `ControllableComponent` exposes a reserved `"control"` input port: a
+`ControlMessage` delivered there is handled by `on_control(msg)` (which mutates
+state) and produces no downstream output. This lets a downstream component
+reconfigure an upstream one — a feedback cycle — without a runaway loop, since the
+back-edge carries control rather than signal. Wire it with the usual port refs:
+
+```python
+from rfdes.components import TunableBandpassFilter, PulseDetector, ScanScheduler, Recorder
+
+filt >> det
+det  >> rec
+det  >> scan
+scan >> filt["control"]   # feedback: retune the front-end filter
+```
+
+`ScanScheduler` watches the detector and retunes `TunableBandpassFilter` band by
+band until pulses appear, then dwells — see `examples/demo_feedback.py`.
+
 Wire merges with `>>` by targeting a named port via `component[port]`:
 
 ```python
@@ -218,6 +238,7 @@ python examples/demo_dynamic_delay.py      # data-dependent and random delays
 python examples/demo_transmit.py           # platform 6DOF state + transmit egress
 python examples/demo_blocking.py           # blocking: queue vs drop while busy
 python examples/demo_jammer.py             # capstone: detect pulses, jam @ 2.4 GHz
+python examples/demo_feedback.py           # closed loop: scan scheduler retunes filter
 ```
 
 The capstone `demo_jammer.py` ties everything together: an EW platform (with 6DOF

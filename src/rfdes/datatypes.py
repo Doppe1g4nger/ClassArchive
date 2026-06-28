@@ -62,6 +62,25 @@ class Spectrogram(DataObject):
 
 
 @dataclass(frozen=True)
+class ControlMessage(DataObject):
+    """A control / feedback message used to reconfigure a component's state.
+
+    Delivered to a :class:`~rfdes.component.ControllableComponent`'s ``control``
+    input port (e.g. a scan scheduler retuning a filter). ``params`` carries the
+    new settings, keyed by the target component's understood control keys.
+
+    Attributes:
+        params: Named control settings (e.g. ``{"passband_center": 2e6}``).
+        start_time: Host-clock time the command pertains to.
+        metadata: Free-form additional state.
+    """
+
+    params: dict = field(default_factory=dict)
+    start_time: float = 0.0
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class DetectionReport(DataObject):
     """A fused, higher-level result combining several upstream products.
 

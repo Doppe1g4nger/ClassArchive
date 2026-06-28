@@ -18,11 +18,15 @@ from collections import deque
 from dataclasses import replace
 from typing import Any, Callable, Optional, Union
 
+from .datatypes import ControlMessage
 from .events import DataObject, SignalPayload
 from .scheduler import Scheduler
 
 #: The implicit input port name used by ordinary single-input components.
 DEFAULT_PORT = "in"
+
+#: Reserved input port for control / feedback messages (see ControllableComponent).
+CONTROL_PORT = "control"
 
 #: A processing delay: a constant, or a callable computing the delay from the
 #: component's input (for ordinary components) or the matched ``{port: data}``
@@ -345,4 +349,35 @@ class MergeComponent(Component):
         ``inputs`` maps each port name to its matched data object. Return the
         fused :class:`~rfdes.events.DataObject`, or ``None`` to absorb.
         """
+        raise NotImplementedError
+
+
+class ControllableComponent(Component):
+    """A component that accepts closed-loop control on a reserved ``control`` port.
+
+    In addition to its normal signal flow, the component exposes a ``"control"``
+    input port (accepting :class:`~rfdes.datatypes.ControlMessage` by default).
+    Wire feedback to it with the usual port refs, e.g.
+    ``scanner >> filter["control"]``. A control message is handled by
+    :meth:`on_control` (which mutates state) and produces **no** downstream
+    output -- it does not run :meth:`on_signal`, emit, or block. This lets a
+    downstream component reconfigure an upstream one (a feedback cycle); because
+    the back-edge carries control, not signal, there is no runaway loop.
+    """
+
+    control_accepts: tuple[type, ...] = (ControlMessage,)
+
+    def input_ports(self) -> dict[str, tuple[type, ...]]:
+        ports = dict(super().input_ports())
+        ports[CONTROL_PORT] = self.control_accepts
+        return ports
+
+    def receive(self, data: DataObject, port: str = DEFAULT_PORT) -> None:
+        if port == CONTROL_PORT:
+            self.on_control(data)
+            return
+        super().receive(data, port)
+
+    def on_control(self, msg: DataObject) -> None:
+        """Apply a control / feedback message by mutating state. Override this."""
         raise NotImplementedError
