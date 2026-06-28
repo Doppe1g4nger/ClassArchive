@@ -48,4 +48,4 @@ class SpectrumAnalyzer(Component):
         if not self.payloads:
             return None
         iq = self.payloads[-1].iq
-        return np.abs(np.fft.fftshift(np.fft.fft(iq, axis=-1)))
+        return np.abs(np.fft.fftshift(np.fft.fft(iq, axis=-1), axes=-1))

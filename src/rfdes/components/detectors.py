@@ -86,9 +86,14 @@ class Spectrogrammer(Component):
         starts = list(range(0, max(n - self.nfft, 0) + 1, self.hop))
         frames = []
         for s in starts:
-            frame = iq[s:s + self.nfft]
-            spec = np.fft.fftshift(np.fft.fft(frame, n=self.nfft))
-            frames.append(np.abs(spec) ** 2)
+            frame = iq[..., s:s + self.nfft]
+            spec = np.fft.fftshift(np.fft.fft(frame, n=self.nfft, axis=-1), axes=-1)
+            power = np.abs(spec) ** 2
+            if power.ndim > 1:
+                # Multi-channel (channels, nfft): combine channels into one
+                # total-power spectrum so the result stays (num_frames, nfft).
+                power = power.sum(axis=0)
+            frames.append(power)
         power = np.array(frames, dtype=float).reshape(-1, self.nfft)
         freqs = np.fft.fftshift(np.fft.fftfreq(self.nfft, d=1.0 / payload.sample_rate))
         times = payload.start_time + np.array(starts, dtype=float) / payload.sample_rate

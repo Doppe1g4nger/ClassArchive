@@ -23,7 +23,10 @@ placed onto the same queue.
   later on the queue, modeling that component's latency.
 - **SignalPayload.** An immutable buffer of IQ samples (`numpy` complex array)
   plus `sample_rate`, `center_freq`, `start_time`, and a `metadata` dict.
-  Transforms return a *new* payload, so fan-out never aliases.
+  Transforms return a *new* payload, so fan-out never aliases. IQ may be `(N,)`
+  or `(channels, N)`: the example processing components accept either (per-sample
+  detectors and the spectrogram combine across channels; signal *sources* like
+  `ToneTransmitter`/`JamController` emit single-channel waveforms).
 - **RFSystem.** Holds components, binds them to the scheduler, and exposes
   `on_signal_rx(...)` — the method the external simulator calls on a `signalRX`
   event. By default the buffer is delivered immediately (`delay=0`), interleaving
