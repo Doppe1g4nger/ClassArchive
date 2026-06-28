@@ -164,6 +164,47 @@ PulseRelay("relay", processing_delay=per_pulse(1e-9, 5e-10))                 # ~
 Any `callable(input) -> float` works; the delay is resolved once per firing
 (so fan-out branches share one consistent value) and must be non-negative.
 
+## Blocking / queueing while processing
+
+By default a component is non-blocking (it can process overlapping inputs). Pass
+`when_busy` to model a component that processes one item at a time and is busy for
+its `processing_delay`:
+
+```python
+Component("slow", processing_delay=3.0, when_busy="queue")  # late inputs wait (FIFO)
+Component("slow", processing_delay=3.0, when_busy="drop")   # late inputs discarded
+```
+
+The component exposes `processing` (True while busy) and `dropped` (count under
+`"drop"`). Queued items incur real queueing delay. Applies to single-input
+components (and `Transmitter` relay mode); `MergeComponent` stays non-blocking.
+
+## Platform state and transmitting back to the environment
+
+An `RFSystem` models a platform: it carries a `name` and a 6DOF `PlatformState`
+(position, velocity, quaternion `orientation`, `angular_velocity`, `metadata`).
+Components can read it via `self.system.state`.
+
+A `Transmitter` sends a buffer back to the environment through a settable
+`on_transmit(payload, state)` hook (the egress counterpart of `signalRX`); the
+system passes a snapshot of the platform's 6DOF state with each transmission.
+
+```python
+from rfdes import RFSystem, PlatformState, HeapScheduler
+from rfdes.components import Repeater, ToneTransmitter
+
+def on_transmit(payload, state):       # supplied by the environment integration
+    ...                                 # state.position / .velocity / .orientation
+
+state = PlatformState(name="A", position=[1000, 2000, 500], velocity=[-50, 0, 0])
+system = RFSystem(HeapScheduler(), name="A", state=state, on_transmit=on_transmit)
+
+rep = system.add(Repeater("rep", gain_db=20))      # relay: signalRX -> retransmit
+system.set_entry(rep)
+beacon = system.add(ToneTransmitter("beacon", freq=1e6, sample_rate=10e6, num_samples=256))
+beacon.fire()                                       # source: emit a tone
+```
+
 ## Examples & tests
 
 ```bash
@@ -174,4 +215,6 @@ python examples/demo_fanout.py
 python examples/demo_multitype.py          # multiple data types + validation + merge
 python examples/demo_split_merge_rshift.py # split + merge wired with >>
 python examples/demo_dynamic_delay.py      # data-dependent and random delays
+python examples/demo_transmit.py           # platform 6DOF state + transmit egress
+python examples/demo_blocking.py           # blocking: queue vs drop while busy
 ```

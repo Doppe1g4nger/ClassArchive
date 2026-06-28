@@ -25,6 +25,7 @@ from .component import Component, MergeComponent
 from .datatypes import DetectionReport, PulseBuffer, Spectrogram
 from .events import SIGNAL_RX, DEFAULT_IQ_DTYPE, DataObject, Event, SignalPayload
 from .scheduler import HeapScheduler, Scheduler
+from .state import PlatformState
 from .system import RFSystem, TypeCheckError
 
 __version__ = "0.1.0"
@@ -33,6 +34,7 @@ __all__ = [
     "Component",
     "MergeComponent",
     "delays",
+    "PlatformState",
     "Event",
     "DataObject",
     "SignalPayload",

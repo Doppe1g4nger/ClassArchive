@@ -72,11 +72,28 @@ class Component:
     accepts: tuple[type, ...] = (SignalPayload,)
     produces: Optional[type] = SignalPayload
 
-    def __init__(self, name: str, processing_delay: DelaySpec = 0.0) -> None:
+    def __init__(
+        self,
+        name: str,
+        processing_delay: DelaySpec = 0.0,
+        when_busy: Optional[str] = None,
+    ) -> None:
         if not callable(processing_delay) and processing_delay < 0:
             raise ValueError("processing_delay must be non-negative")
+        if when_busy not in (None, "queue", "drop"):
+            raise ValueError("when_busy must be None, 'queue', or 'drop'")
         self.name = name
         self.processing_delay = processing_delay
+        #: Policy for inputs that arrive while the component is busy: ``None``
+        #: (non-blocking, unlimited concurrency), ``"queue"``, or ``"drop"``.
+        self.when_busy = when_busy
+        #: True while the component is occupied processing an item (blocking mode).
+        self.processing = False
+        #: Count of inputs discarded under the ``"drop"`` policy.
+        self.dropped = 0
+        self._inbox: deque = deque()
+        # Back-reference to the owning RFSystem, set by RFSystem.add().
+        self.system: Optional[Any] = None
         # Each subscriber is stored with the downstream input port it feeds.
         self._subscribers: list[tuple[Component, str]] = []
         self._scheduler: Optional[Scheduler] = None
@@ -141,13 +158,45 @@ class Component:
     def receive(self, data: DataObject, port: str = DEFAULT_PORT) -> None:
         """Framework entry point, invoked by a scheduled callback.
 
-        Runs the user transform and, if it returns a data object, fans it out.
-        ``port`` is accepted for interface uniformity but ignored by ordinary
-        single-input components.
+        In the default (non-blocking) mode, runs the user transform and fans the
+        result out. If a ``when_busy`` policy is set, the component processes one
+        item at a time: an input that arrives while :attr:`processing` is True is
+        either queued (FIFO) or dropped. ``port`` is accepted for interface
+        uniformity but ignored by ordinary single-input components.
         """
+        if self.when_busy is None:
+            result = self.on_signal(data)
+            if result is not None:
+                self._emit(result, trigger=data)
+            return
+
+        if self.processing:
+            if self.when_busy == "drop":
+                self.dropped += 1
+            else:  # "queue"
+                self._inbox.append(data)
+            return
+        self._begin(data)
+
+    def _begin(self, data: DataObject) -> None:
+        """Start processing one item (blocking mode): busy for exactly its delay."""
+        self.processing = True
         result = self.on_signal(data)
+        delay = self._resolve_delay(data)
         if result is not None:
-            self._emit(result, trigger=data)
+            self._deliver(result, delay)
+        if self._scheduler is None:
+            raise RuntimeError(
+                f"component {self.name!r} is not bound to a scheduler; "
+                "add it to an RFSystem (or call bind()) before running"
+            )
+        self._scheduler.schedule(delay, self._release)
+
+    def _release(self) -> None:
+        """Finish the current item; start the next queued one if any."""
+        self.processing = False
+        if self._inbox:
+            self._begin(self._inbox.popleft())
 
     def on_signal(self, data: DataObject) -> Optional[DataObject]:
         """Transform an incoming data object. Override in subclasses.
@@ -175,15 +224,24 @@ class Component:
         return delay
 
     def _emit(self, data: DataObject, trigger: Any = None) -> None:
-        """Schedule delivery of ``data`` to each subscriber after the delay."""
+        """Resolve this firing's delay and deliver ``data`` downstream."""
+        # Resolve the (possibly data-dependent or random) delay once per firing
+        # so every fan-out branch sees the same, consistent latency.
+        delay = self._resolve_delay(trigger if trigger is not None else data)
+        self._deliver(data, delay)
+
+    def _deliver(self, data: DataObject, delay: float) -> None:
+        """Schedule delivery of ``data`` to each subscriber after ``delay``.
+
+        Overridden by components whose output leaves the system (e.g.
+        :class:`~rfdes.components.transmitters.Transmitter` routes to the
+        environment instead of subscribers).
+        """
         if self._scheduler is None:
             raise RuntimeError(
                 f"component {self.name!r} is not bound to a scheduler; "
                 "add it to an RFSystem (or call bind()) before running"
             )
-        # Resolve the (possibly data-dependent or random) delay once per firing
-        # so every fan-out branch sees the same, consistent latency.
-        delay = self._resolve_delay(trigger if trigger is not None else data)
         out = replace(data, start_time=data.start_time + delay)
         multi = len(self._subscribers) > 1
         for sub, port in self._subscribers:

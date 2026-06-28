@@ -7,13 +7,14 @@ simulator calls when it raises a ``signalRX`` event with a buffer of IQ samples.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
 from .component import DEFAULT_PORT, Component, MergeComponent
-from .events import DEFAULT_IQ_DTYPE, SignalPayload
+from .events import DEFAULT_IQ_DTYPE, DataObject, SignalPayload
 from .scheduler import Scheduler
+from .state import PlatformState
 
 
 class TypeCheckError(Exception):
@@ -27,21 +28,42 @@ class TypeCheckError(Exception):
 class RFSystem:
     """A composed RF system driven by an (external or reference) scheduler.
 
+    Models a platform: it carries identity and 6DOF :class:`~rfdes.state.PlatformState`,
+    receives signals from the environment via :meth:`on_signal_rx`, and transmits
+    back via :meth:`transmit` (the egress used by
+    :class:`~rfdes.components.transmitters.Transmitter`).
+
     Args:
         scheduler: The host event queue. Use
             :class:`~rfdes.scheduler.HeapScheduler` to run standalone, or an
             adapter around the external RF-environment simulator's queue.
+        name: Platform name.
+        state: Initial 6DOF platform state (defaults to a zero state named ``name``).
+        on_transmit: Environment egress callback ``on_transmit(payload, state)``
+            invoked when a transmitter sends a buffer back to the environment.
     """
 
-    def __init__(self, scheduler: Scheduler) -> None:
+    def __init__(
+        self,
+        scheduler: Scheduler,
+        name: str = "",
+        state: Optional[PlatformState] = None,
+        on_transmit: Optional[Callable[[DataObject, PlatformState], None]] = None,
+    ) -> None:
         self.scheduler = scheduler
+        self.name = name
+        self.state = state if state is not None else PlatformState(name=name)
+        if not self.state.name:
+            self.state.name = name
+        self.on_transmit = on_transmit
         self.entry: Optional[Component] = None
         self._components: list[Component] = []
         self._validated = False
 
     def add(self, component: Component) -> Component:
-        """Register ``component`` and bind it to the scheduler. Returns it."""
+        """Register ``component``, bind its scheduler, and back-link it. Returns it."""
         component.bind(self.scheduler)
+        component.system = self
         self._components.append(component)
         self._validated = False
         return component
@@ -116,11 +138,38 @@ class RFSystem:
                         f"{sorted(missing)}; it would never fire"
                     )
 
+        if self.on_transmit is None:
+            transmitters = [c for c in self._components if getattr(c, "_is_transmitter", False)]
+            if transmitters:
+                names = ", ".join(repr(c.name) for c in transmitters)
+                errors.append(
+                    f"transmitter(s) {names} present but no on_transmit hook is set; "
+                    "they could never deliver to the environment"
+                )
+
         if errors:
             raise TypeCheckError(
                 "RF system failed type validation:\n  - " + "\n  - ".join(errors)
             )
         self._validated = True
+
+    def transmit(self, payload: DataObject, source: Optional[Component] = None) -> None:
+        """Send a signal buffer back to the environment (the egress of signalRX).
+
+        Called by a :class:`~rfdes.components.transmitters.Transmitter` when it
+        fires. Schedules the ``on_transmit`` hook at ``delay=0`` so the handoff
+        passes through the host queue (interleaving with other same-timestamp
+        events), passing the payload and a snapshot of the platform 6DOF state so
+        the environment can model propagation from this platform.
+        """
+        if self.on_transmit is None:
+            raise RuntimeError(
+                "no on_transmit hook set; cannot send a transmission to the "
+                "environment (pass on_transmit=... to RFSystem)"
+            )
+        snapshot = self.state.snapshot()
+        hook = self.on_transmit
+        self.scheduler.schedule(0.0, lambda: hook(payload, snapshot))
 
     def on_signal_rx(
         self,
