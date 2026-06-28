@@ -128,8 +128,7 @@ def main() -> None:
     before = len(egress)
     base = sched.now()
     for i in range(5):
-        sig = pulsed(2.4e9)
-        sched.schedule(base + i * 1e-6, lambda s=sig: system.on_signal_rx(**s))
+        system.on_signal_rx(**pulsed(2.4e9), at=base + i * 1e-6)
     sched.run()
     emitted = len(egress) - before
     print(f"  -> {emitted} jam(s) emitted, {jammer.dropped} dropped while busy "

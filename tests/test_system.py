@@ -78,3 +78,74 @@ def test_metadata_passed_through_signal_rx():
     sched.run()
     assert rec.payloads[0].metadata["source"] == "env"
     assert rec.payloads[0].metadata["snr"] == 12.0
+
+
+class TimeSink(Component):
+    """Records the scheduler time at which each buffer is received."""
+
+    produces = None
+
+    def __init__(self, name, scheduler):
+        super().__init__(name)
+        self._sched = scheduler
+        self.times = []
+
+    def on_signal(self, data):
+        self.times.append(self._sched.now())
+        return None
+
+
+def test_signal_rx_at_absolute_time():
+    sched = HeapScheduler()
+    system = RFSystem(sched)
+    sink = system.add(TimeSink("sink", sched))
+    system.set_entry(sink)
+    system.on_signal_rx(np.ones(4, dtype=np.complex64), 1e6, 1e9, at=25.0)
+    sched.run()
+    assert sink.times == [25.0]                      # delivered at scheduler time 25
+    assert sched.now() == 25.0
+
+
+def test_signal_rx_default_start_time_is_delivery_time():
+    sched = HeapScheduler()
+    system = RFSystem(sched)
+    rec = system.add(Recorder("rec"))
+    system.set_entry(rec)
+    system.on_signal_rx(np.ones(4, dtype=np.complex64), 1e6, 1e9, at=12.0)
+    sched.run()
+    assert rec.payloads[0].start_time == 12.0        # start_time defaults to `at`
+
+
+def test_explicit_t_overrides_start_time_independent_of_at():
+    sched = HeapScheduler()
+    system = RFSystem(sched)
+    rec = system.add(Recorder("rec"))
+    system.set_entry(rec)
+    system.on_signal_rx(np.ones(4, dtype=np.complex64), 1e6, 1e9, at=12.0, t=99.0)
+    sched.run()
+    assert rec.payloads[0].start_time == 99.0
+
+
+def test_signal_rx_in_the_past_raises():
+    sched = HeapScheduler()
+    system = RFSystem(sched)
+    sink = system.add(TimeSink("sink", sched))
+    system.set_entry(sink)
+    # advance the clock to t=10, then try to schedule at t=5
+    sched.schedule(10.0, lambda: None)
+    sched.run()
+    with pytest.raises(ValueError):
+        system.on_signal_rx(np.ones(4, dtype=np.complex64), 1e6, 1e9, at=5.0)
+
+
+def test_multiple_signal_rx_fire_in_time_order():
+    sched = HeapScheduler()
+    system = RFSystem(sched)
+    sink = system.add(TimeSink("sink", sched))
+    system.set_entry(sink)
+    iq = np.ones(4, dtype=np.complex64)
+    system.on_signal_rx(iq, 1e6, 1e9, at=30.0)
+    system.on_signal_rx(iq, 1e6, 1e9, at=10.0)
+    system.on_signal_rx(iq, 1e6, 1e9, at=20.0)
+    sched.run()
+    assert sink.times == [10.0, 20.0, 30.0]

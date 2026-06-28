@@ -26,8 +26,11 @@ placed onto the same queue.
   Transforms return a *new* payload, so fan-out never aliases.
 - **RFSystem.** Holds components, binds them to the scheduler, and exposes
   `on_signal_rx(...)` — the method the external simulator calls on a `signalRX`
-  event. The handoff is scheduled at `delay=0` so it interleaves correctly with
-  the environment's other same-timestamp events instead of jumping ahead.
+  event. By default the buffer is delivered immediately (`delay=0`), interleaving
+  correctly with the environment's other same-timestamp events; pass
+  `at=<scheduler time>` to schedule the delivery at an arbitrary future time on
+  the queue, like any normal event (the sample `start_time` defaults to that
+  delivery time).
 
 ## Quick start
 

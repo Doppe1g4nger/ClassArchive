@@ -41,10 +41,11 @@ def run(policy: str) -> None:
     slow.subscribe(sink)
     system.set_entry(slow)
 
-    # Arrivals at t = 0,1,2,3,4 -- faster than the 3.0 processing time.
+    # Arrivals at t = 0,1,2,3,4 -- faster than the 3.0 processing time. Each
+    # signalRX is scheduled directly onto the queue at its absolute time.
     iq = np.ones(8, dtype=np.complex64)
     for t in range(5):
-        sched.schedule(float(t), lambda: system.on_signal_rx(iq, 1e6, 1e9))
+        system.on_signal_rx(iq, 1e6, 1e9, at=float(t))
 
     sched.run()
     print(f"when_busy={policy!r}:")

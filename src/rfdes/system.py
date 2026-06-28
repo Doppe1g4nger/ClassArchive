@@ -176,22 +176,27 @@ class RFSystem:
         iq: np.ndarray,
         sample_rate: float,
         center_freq: float,
+        at: Optional[float] = None,
         t: Optional[float] = None,
         **metadata,
     ) -> None:
         """Handle a ``signalRX`` event from the RF environment model.
 
-        The external simulator calls this with a fresh IQ buffer. Delivery to
-        the entry component is scheduled at ``delay=0`` so it passes *through*
-        the host queue, interleaving correctly with other events at the same
-        timestamp rather than running ahead of them.
+        The external simulator calls this with a fresh IQ buffer. The buffer is
+        scheduled onto the host queue and delivered to the entry component at the
+        chosen time, like any normal event, so it interleaves correctly with
+        other same-timestamp events (FIFO).
 
         Args:
             iq: Complex sample buffer (coerced to the framework default dtype if
                 not already complex).
             sample_rate: Sample rate in Hz.
             center_freq: Center frequency in Hz.
-            t: Host-clock time of the first sample; defaults to ``now()``.
+            at: Absolute scheduler time to deliver the buffer to the entry
+                component; defaults to ``now()`` (immediate, ``delay=0``). Must
+                not be in the past.
+            t: Host-clock time of the first sample; defaults to the delivery time
+                (``at`` or ``now()``).
             **metadata: Arbitrary tags carried with the payload.
         """
         if self.entry is None:
@@ -199,6 +204,14 @@ class RFSystem:
 
         if not self._validated:
             self.validate()  # runtime type check before the first event runs
+
+        now = self.scheduler.now()
+        deliver_at = now if at is None else at
+        delay = deliver_at - now
+        if delay < 0:
+            raise ValueError(
+                f"cannot schedule signalRX in the past: at={at} is before now()={now}"
+            )
 
         arr = np.asarray(iq)
         if not np.iscomplexobj(arr):
@@ -208,8 +221,8 @@ class RFSystem:
             iq=arr,
             sample_rate=sample_rate,
             center_freq=center_freq,
-            start_time=self.scheduler.now() if t is None else t,
+            start_time=deliver_at if t is None else t,
             metadata=dict(metadata),
         )
         entry = self.entry
-        self.scheduler.schedule(0.0, lambda: entry.receive(payload))
+        self.scheduler.schedule(delay, lambda: entry.receive(payload))
