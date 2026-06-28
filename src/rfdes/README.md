@@ -217,4 +217,12 @@ python examples/demo_split_merge_rshift.py # split + merge wired with >>
 python examples/demo_dynamic_delay.py      # data-dependent and random delays
 python examples/demo_transmit.py           # platform 6DOF state + transmit egress
 python examples/demo_blocking.py           # blocking: queue vs drop while busy
+python examples/demo_jammer.py             # capstone: detect pulses, jam @ 2.4 GHz
 ```
+
+The capstone `demo_jammer.py` ties everything together: an EW platform (with 6DOF
+state) ingests `signalRX`, splits to a `PulseDetector` and `Spectrogrammer`,
+fuses them (`DetectionFusion`), and a `JamController` emits a barrage-noise jam
+back to the environment — but only when pulses are present **and** the carrier is
+at 2.4 GHz. The jammer `Transmitter` uses `when_busy="drop"`, so a rapid burst
+shows jams being dropped while it is busy.

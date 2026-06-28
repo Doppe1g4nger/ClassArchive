@@ -6,6 +6,7 @@ by subclassing ``Component`` and overriding ``on_signal``.
 
 from .active import ADC, Amplifier, Mixer
 from .detectors import DetectionFusion, PulseDetector, Spectrogrammer
+from .jammer import JamController
 from .passive import Attenuator, Filter, Splitter
 from .sinks import Recorder, SpectrumAnalyzer
 from .transmitters import Repeater, ToneTransmitter, Transmitter
@@ -20,6 +21,7 @@ __all__ = [
     "PulseDetector",
     "Spectrogrammer",
     "DetectionFusion",
+    "JamController",
     "Recorder",
     "SpectrumAnalyzer",
     "Transmitter",
