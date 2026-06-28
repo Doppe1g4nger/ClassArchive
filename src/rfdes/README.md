@@ -228,6 +228,21 @@ beacon = system.add(ToneTransmitter("beacon", freq=1e6, sample_rate=10e6, num_sa
 beacon.fire()                                       # source: emit a tone
 ```
 
+## Inspecting the event queue
+
+At any point during a run, `HeapScheduler` can dump the events and timestamps
+still left to fire (each labelled with what it will do):
+
+```python
+sched.print_queue()        # prints to stdout
+sched.pending()            # -> [(time, label), ...] in fire order
+sched.format_queue()       # -> the same as a string
+```
+
+Call it before running, after `run(until=...)`, or from inside a component. The
+framework tags its own events (e.g. `signalRX→LNA`, `LNA→recA`,
+`jammer→environment`); see `examples/demo_queue_inspect.py`.
+
 ## Examples & tests
 
 ```bash
@@ -242,6 +257,7 @@ python examples/demo_transmit.py           # platform 6DOF state + transmit egre
 python examples/demo_blocking.py           # blocking: queue vs drop while busy
 python examples/demo_jammer.py             # capstone: detect pulses, jam @ 2.4 GHz
 python examples/demo_feedback.py           # closed loop: scan scheduler retunes filter
+python examples/demo_queue_inspect.py      # print the events/timestamps left on the queue
 ```
 
 The capstone `demo_jammer.py` ties everything together: an EW platform (with 6DOF

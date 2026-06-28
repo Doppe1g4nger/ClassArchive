@@ -13,7 +13,7 @@ import numpy as np
 
 from .component import DEFAULT_PORT, Component, MergeComponent
 from .events import DEFAULT_IQ_DTYPE, DataObject, SignalPayload
-from .scheduler import Scheduler
+from .scheduler import Scheduler, labeled
 from .state import PlatformState
 
 
@@ -169,7 +169,9 @@ class RFSystem:
             )
         snapshot = self.state.snapshot()
         hook = self.on_transmit
-        self.scheduler.schedule(0.0, lambda: hook(payload, snapshot))
+        src = source.name if source is not None else "?"
+        cb = lambda: hook(payload, snapshot)
+        self.scheduler.schedule(0.0, labeled(cb, f"transmit {src}→environment"))
 
     def on_signal_rx(
         self,
@@ -225,4 +227,5 @@ class RFSystem:
             metadata=dict(metadata),
         )
         entry = self.entry
-        self.scheduler.schedule(delay, lambda: entry.receive(payload))
+        cb = lambda: entry.receive(payload)
+        self.scheduler.schedule(delay, labeled(cb, f"signalRX→{entry.name}"))

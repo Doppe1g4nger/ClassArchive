@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional, Union
 
 from .datatypes import ControlMessage
 from .events import DataObject, SignalPayload
-from .scheduler import Scheduler
+from .scheduler import Scheduler, labeled
 
 #: The implicit input port name used by ordinary single-input components.
 DEFAULT_PORT = "in"
@@ -194,7 +194,8 @@ class Component:
                 f"component {self.name!r} is not bound to a scheduler; "
                 "add it to an RFSystem (or call bind()) before running"
             )
-        self._scheduler.schedule(delay, self._release)
+        release = lambda: self._release()  # noqa: E731 - need an attributable callable
+        self._scheduler.schedule(delay, labeled(release, f"{self.name} release"))
 
     def _release(self) -> None:
         """Finish the current item; start the next queued one if any."""
@@ -255,10 +256,9 @@ class Component:
             payload = out.copy() if multi else out
             # default-arg binding pins the loop variables, avoiding the
             # late-binding closure bug.
-            self._scheduler.schedule(
-                delay,
-                lambda s=sub, pt=port, p=payload: s.receive(p, pt),
-            )
+            cb = lambda s=sub, pt=port, p=payload: s.receive(p, pt)
+            suffix = "" if port == DEFAULT_PORT else f"[{port}]"
+            self._scheduler.schedule(delay, labeled(cb, f"{self.name}→{sub.name}{suffix}"))
 
     def __repr__(self) -> str:  # pragma: no cover - cosmetic
         return f"{type(self).__name__}(name={self.name!r}, delay={self.processing_delay})"

@@ -23,6 +23,7 @@ import numpy as np
 
 from ..component import Component
 from ..events import DataObject, SignalPayload
+from ..scheduler import labeled
 from ..state import PlatformState
 
 
@@ -68,10 +69,8 @@ class Transmitter(Component):
                 "add it with RFSystem.add() so it can reach the environment"
             )
         out = replace(data, start_time=data.start_time + delay)
-        self._scheduler.schedule(
-            delay,
-            lambda p=out: self.system.transmit(p, source=self),
-        )
+        cb = lambda p=out: self.system.transmit(p, source=self)
+        self._scheduler.schedule(delay, labeled(cb, f"{self.name}→environment"))
 
     def fire(self, payload: Optional[SignalPayload] = None) -> None:
         """Source mode: emit a buffer now (built from ``payload`` or the generator).
