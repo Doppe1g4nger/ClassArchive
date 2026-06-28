@@ -258,14 +258,19 @@ python examples/demo_split_merge_rshift.py # split + merge wired with >>
 python examples/demo_dynamic_delay.py      # data-dependent and random delays
 python examples/demo_transmit.py           # platform 6DOF state + transmit egress
 python examples/demo_blocking.py           # blocking: queue vs drop while busy
-python examples/demo_jammer.py             # capstone: detect pulses, jam @ 2.4 GHz
+python examples/demo_jammer.py             # capstone: scan, detect pulses, jam @ 2.4 GHz
 python examples/demo_feedback.py           # closed loop: scan scheduler retunes filter
 python examples/demo_queue_inspect.py      # print the events/timestamps left on the queue
 ```
 
-The capstone `demo_jammer.py` ties everything together: an EW platform (with 6DOF
-state) ingests `signalRX`, splits to a `PulseDetector` and `Spectrogrammer`,
-fuses them (`DetectionFusion`), and a `JamController` emits a barrage-noise jam
-back to the environment — but only when pulses are present **and** the carrier is
-at 2.4 GHz. The jammer `Transmitter` uses `when_busy="drop"`, so a rapid burst
-shows jams being dropped while it is busy.
+The capstone `demo_jammer.py` ties essentially every feature together: an EW
+platform (with 6DOF state) ingests multi-channel `signalRX`, through a
+`TunableBandpassFilter` front-end that a `ScanScheduler` **retunes via closed-loop
+feedback** (`scan >> filter["control"]`) until the `PulseDetector` finds the
+threat's band. A `Spectrogrammer` + `DetectionFusion` feed a `JamController` that
+emits a barrage-noise jam back to the environment — but only once pulses are
+present **and** the carrier is at 2.4 GHz (off-target carriers are gated even when
+acquired). The jammer `Transmitter` uses `when_busy="drop"`, so a rapid burst
+shows jams dropped while busy, and `scheduler.print_queue()` dumps the pending
+events. Dynamic delays (jitter / per-sample / per-pulse) and pre-sim type
+validation run throughout.

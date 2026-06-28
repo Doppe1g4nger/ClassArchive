@@ -7,9 +7,11 @@ from rfdes.components import (
     DetectionFusion,
     JamController,
     PulseDetector,
+    ScanScheduler,
     Spectrogrammer,
     Splitter,
     Transmitter,
+    TunableBandpassFilter,
 )
 from rfdes.datatypes import DetectionReport, PulseBuffer, Spectrogram
 
@@ -113,3 +115,72 @@ def test_rapid_burst_drops_jams_while_busy():
     assert len(egress) >= 1            # at least one jam got out
     assert jammer.dropped >= 1         # some were dropped while busy
     assert len(egress) + jammer.dropped == 5
+
+
+# -- closed-loop scan-acquire-then-jam (the expanded capstone topology) --------
+BANDS = [-4e6, -2e6, 0.0, 2e6, 4e6]
+
+
+def build_scan_jam(sched, egress):
+    system = RFSystem(sched, name="EW", state=PlatformState(name="EW"),
+                      on_transmit=lambda p, s: egress.append((sched.now(), p, s)))
+    lna = system.add(Amplifier("lna", gain_db=20.0))
+    filt = system.add(TunableBandpassFilter("filt", bandwidth=2e6, passband_center=BANDS[0]))
+    split = system.add(Splitter("split"))
+    det = system.add(PulseDetector("det", threshold=5.0))
+    spec = system.add(Spectrogrammer("spec", nfft=64))
+    fusion = system.add(DetectionFusion("fusion"))
+    scan = system.add(ScanScheduler("scan", bands=BANDS, bandwidth=2e6, start_index=0))
+    jam = system.add(JamController("jam", target_freq=2.4e9, num_samples=64,
+                                   rng=np.random.default_rng(0)))
+    jammer = system.add(Transmitter("jammer"))
+    lna >> filt >> split
+    split >> det
+    split >> spec >> fusion["spectrogram"]
+    split >> jam["rf"]
+    det >> fusion["pulses"]
+    det >> scan
+    scan >> filt["control"]
+    fusion >> jam["report"]
+    jam >> jammer
+    system.set_entry(lna)
+    return system, filt, scan
+
+
+def pulsed_2ch(center_freq, n=1024):
+    k = np.arange(n)
+    tone = np.exp(2j * np.pi * 2e6 * k / 10e6)   # +2 MHz baseband
+    env = np.full(n, 0.02)
+    for b in range(3):
+        s = (b + 1) * n // 4
+        env[s:s + 68] = 1.0
+    return np.stack([env * tone, 0.5 * env * tone]).astype(np.complex64)
+
+
+def test_scan_acquires_then_jams():
+    sched = HeapScheduler()
+    egress = []
+    system, filt, scan = build_scan_jam(sched, egress)
+    sig = pulsed_2ch(2.4e9)
+    jammed = []
+    for _ in range(6):
+        before = len(egress)
+        system.on_signal_rx(sig, sample_rate=10e6, center_freq=2.4e9)
+        sched.run()
+        jammed.append(len(egress) > before)
+
+    assert scan.locked and filt.passband_center == 2e6   # locked onto the threat band
+    assert not any(jammed[:3])                            # scanning -> no jam
+    assert all(jammed[3:])                                # locked -> jamming
+
+
+def test_scan_jam_is_carrier_gated():
+    sched = HeapScheduler()
+    egress = []
+    system, filt, scan = build_scan_jam(sched, egress)
+    sig = pulsed_2ch(1.5e9)                               # off-target carrier
+    for _ in range(6):
+        system.on_signal_rx(sig, sample_rate=10e6, center_freq=1.5e9)
+        sched.run()
+    assert filt.passband_center == 2e6 and scan.locked    # still acquires the band
+    assert egress == []                                   # but never jams (carrier gated)
