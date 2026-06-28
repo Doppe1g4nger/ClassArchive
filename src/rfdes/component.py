@@ -137,8 +137,20 @@ class Component:
         return self.subscribe(downstream)
 
     def __getitem__(self, port: str) -> _PortRef:
-        """``component[port]`` -> a port reference usable with ``>>``."""
+        """``component[port]`` -> a port reference usable with ``>>``.
+
+        Only string port names are valid. Rejecting non-string keys also stops
+        Python's legacy sequence-iteration protocol (which probes ``[0], [1],
+        ...``) from making a component look like an infinite iterable.
+        """
+        if not isinstance(port, str):
+            raise TypeError(
+                f"component port must be a string port name, got {type(port).__name__}"
+            )
         return _PortRef(self, port)
+
+    def __iter__(self):
+        raise TypeError(f"{type(self).__name__} is not iterable")
 
     @property
     def subscribers(self) -> tuple["Component", ...]:

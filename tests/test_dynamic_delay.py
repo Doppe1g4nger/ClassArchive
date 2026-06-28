@@ -164,6 +164,16 @@ def test_merge_delay_callable_receives_inputs_dict():
 
 
 # -- `>>` port references -----------------------------------------------------
+def test_getitem_rejects_non_string_and_is_not_iterable():
+    c = Component("c")
+    with pytest.raises(TypeError):
+        c[0]                       # non-string port index
+    with pytest.raises(TypeError):
+        iter(c)                    # components must not be (infinitely) iterable
+    with pytest.raises(TypeError):
+        list(c)
+
+
 def test_getitem_returns_portref():
     class TwoIn(MergeComponent):
         inputs = {"x": (SignalPayload,), "y": (SignalPayload,)}

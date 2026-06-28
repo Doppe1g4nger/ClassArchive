@@ -147,6 +147,16 @@ def test_detection_fusion_end_to_end():
     assert report.fields["num_pulses"] == 1
 
 
+def test_pulse_detector_handles_multichannel_iq():
+    pd = PulseDetector("pd", threshold=0.5)
+    iq = np.zeros((2, 64), dtype=np.complex64)  # (channels, N)
+    iq[:, 10:20] = 1.0                          # a burst on both channels
+    out = pd.on_signal(SignalPayload(iq, 1e6, 1e9))
+    assert isinstance(out, PulseBuffer)
+    assert out.num_pulses == 1
+    assert out.pulses[0, 1] == 10               # width
+
+
 def test_intermediate_data_types_are_correct():
     pd = PulseDetector("pd", threshold=0.5)
     sp = Spectrogrammer("sp", nfft=32)

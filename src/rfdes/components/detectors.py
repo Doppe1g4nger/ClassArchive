@@ -35,6 +35,10 @@ class PulseDetector(Component):
 
     def on_signal(self, payload: SignalPayload) -> PulseBuffer:
         mag = np.abs(payload.iq)
+        if mag.ndim > 1:
+            # Multi-channel (channels, N): detect on the per-sample envelope
+            # (max magnitude across channels) so threshold tests stay scalar.
+            mag = mag.max(axis=0)
         above = mag > self.threshold
         rows: list[list[float]] = []
         start: Optional[int] = None
