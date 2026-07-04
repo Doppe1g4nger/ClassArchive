@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .component import DEFAULT_PORT, Component, MergeComponent
+from .component import DEFAULT_PORT, Component, ComponentTiming, MergeComponent
 from .events import DEFAULT_IQ_DTYPE, DataObject, SignalPayload
 from .scheduler import Scheduler, labeled
 from .state import PlatformState
@@ -79,6 +79,40 @@ class RFSystem:
     @property
     def components(self) -> tuple[Component, ...]:
         return tuple(self._components)
+
+    # -- core-execution timing -------------------------------------------
+    def timing_report(self) -> list[ComponentTiming]:
+        """Per-component core-execution timing, sorted by total time (descending).
+
+        Each entry measures only that component's user transform
+        (``on_signal`` / ``on_merge`` / ``on_control``) -- not the framework's
+        data prep or message passing.
+        """
+        return sorted(
+            (c.timing() for c in self._components),
+            key=lambda r: r.total,
+            reverse=True,
+        )
+
+    def reset_timing(self) -> None:
+        """Zero every component's core-execution timing counters."""
+        for c in self._components:
+            c.reset_timing()
+
+    def format_timing(self) -> str:
+        """A human-readable table of per-component core-execution timing."""
+        rows = self.timing_report()
+        header = f"{'component':<18}{'calls':>7}{'total_ms':>12}{'mean_us':>12}"
+        lines = [header, "-" * len(header)]
+        for r in rows:
+            lines.append(
+                f"{r.name:<18}{r.calls:>7}{r.total * 1e3:>12.4f}{r.mean * 1e6:>12.3f}"
+            )
+        return "\n".join(lines)
+
+    def print_timing(self, file=None) -> None:
+        """Print :meth:`format_timing` (defaults to stdout)."""
+        print(self.format_timing(), file=file)
 
     def validate(self) -> None:
         """Type-check the wiring; raise :class:`TypeCheckError` on any problem.

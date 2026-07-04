@@ -21,7 +21,7 @@ Example::
 """
 
 from . import delays
-from .component import Component, ControllableComponent, MergeComponent
+from .component import Component, ComponentTiming, ControllableComponent, MergeComponent
 from .datatypes import ControlMessage, DetectionReport, PulseBuffer, Spectrogram
 from .events import SIGNAL_RX, DEFAULT_IQ_DTYPE, DataObject, Event, SignalPayload
 from .scheduler import HeapScheduler, Scheduler
@@ -34,6 +34,7 @@ __all__ = [
     "Component",
     "MergeComponent",
     "ControllableComponent",
+    "ComponentTiming",
     "delays",
     "PlatformState",
     "ControlMessage",

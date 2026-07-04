@@ -15,7 +15,8 @@ fires only once every port has received data.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import Any, Callable, Optional, Union
 
 from .datatypes import ControlMessage
@@ -32,6 +33,30 @@ CONTROL_PORT = "control"
 #: component's input (for ordinary components) or the matched ``{port: data}``
 #: dict (for :class:`MergeComponent`).
 DelaySpec = Union[float, Callable[[Any], float]]
+
+
+@dataclass(frozen=True)
+class ComponentTiming:
+    """Snapshot of a component's core-execution wall-clock timing.
+
+    "Core execution" is the user transform only (``on_signal`` / ``on_merge`` /
+    ``on_control``). Framework data prep (payload copies, ``start_time`` stamping)
+    and message passing (scheduling, fan-out) are measured *outside* the timed
+    region and are not included.
+
+    Attributes:
+        name: Component name.
+        calls: Number of core-execution invocations.
+        total: Total wall-clock seconds spent in core execution.
+        last: Duration (s) of the most recent core execution.
+        mean: Mean per-call duration (s), ``0.0`` when there were no calls.
+    """
+
+    name: str
+    calls: int
+    total: float
+    last: float
+    mean: float
 
 
 class _PortRef:
@@ -96,6 +121,12 @@ class Component:
         #: Count of inputs discarded under the ``"drop"`` policy.
         self.dropped = 0
         self._inbox: deque = deque()
+        #: Core-execution timing (the user transform only). See :meth:`timing`.
+        self.exec_calls = 0
+        self.exec_time = 0.0
+        self.exec_last = 0.0
+        #: Wall clock used to time core execution; swappable for testing.
+        self._clock: Callable[[], float] = perf_counter
         # Back-reference to the owning RFSystem, set by RFSystem.add().
         self.system: Optional[Any] = None
         # Each subscriber is stored with the downstream input port it feeds.
@@ -181,7 +212,7 @@ class Component:
         uniformity but ignored by ordinary single-input components.
         """
         if self.when_busy is None:
-            result = self.on_signal(data)
+            result = self._run_core(self.on_signal, data)
             if result is not None:
                 self._emit(result, trigger=data)
             return
@@ -197,7 +228,7 @@ class Component:
     def _begin(self, data: DataObject) -> None:
         """Start processing one item (blocking mode): busy for exactly its delay."""
         self.processing = True
-        result = self.on_signal(data)
+        result = self._run_core(self.on_signal, data)
         delay = self._resolve_delay(data)
         if result is not None:
             self._deliver(result, delay)
@@ -222,6 +253,46 @@ class Component:
         ``None`` to absorb it (e.g. a sink). The default is a pass-through.
         """
         return data
+
+    # -- core-execution timing -------------------------------------------
+    def _run_core(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """Invoke a core transform, timing only its wall-clock duration.
+
+        Wraps the user compute (``on_signal`` / ``on_merge`` / ``on_control``) so
+        the framework's data prep (payload copies, ``start_time`` stamping) and
+        message passing (scheduling, fan-out) -- which happen outside this call --
+        are not counted.
+        """
+        clock = self._clock
+        t0 = clock()
+        try:
+            return fn(*args)
+        finally:
+            dt = clock() - t0
+            self.exec_calls += 1
+            self.exec_time += dt
+            self.exec_last = dt
+
+    @property
+    def exec_mean(self) -> float:
+        """Mean core-execution duration (s); ``0.0`` when there were no calls."""
+        return self.exec_time / self.exec_calls if self.exec_calls else 0.0
+
+    def timing(self) -> ComponentTiming:
+        """Snapshot this component's core-execution timing."""
+        return ComponentTiming(
+            name=self.name,
+            calls=self.exec_calls,
+            total=self.exec_time,
+            last=self.exec_last,
+            mean=self.exec_mean,
+        )
+
+    def reset_timing(self) -> None:
+        """Zero the core-execution timing counters."""
+        self.exec_calls = 0
+        self.exec_time = 0.0
+        self.exec_last = 0.0
 
     def _resolve_delay(self, trigger: Any) -> float:
         """Resolve this component's processing delay for one firing.
@@ -317,7 +388,7 @@ class MergeComponent(Component):
         self._pending[port].append(data)
         group = self._find_ready_group()
         if group is not None:
-            result = self.on_merge(group)
+            result = self._run_core(self.on_merge, group)
             if result is not None:
                 # A merge's delay callable sees the matched {port: data} dict.
                 self._emit(result, trigger=group)
@@ -386,7 +457,7 @@ class ControllableComponent(Component):
 
     def receive(self, data: DataObject, port: str = DEFAULT_PORT) -> None:
         if port == CONTROL_PORT:
-            self.on_control(data)
+            self._run_core(self.on_control, data)
             return
         super().receive(data, port)
 

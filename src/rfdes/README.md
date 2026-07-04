@@ -231,6 +231,28 @@ beacon = system.add(ToneTransmitter("beacon", freq=1e6, sample_rate=10e6, num_sa
 beacon.fire()                                       # source: emit a tone
 ```
 
+## Timing component core execution
+
+Every component times its **core execution** — the user transform only
+(`on_signal` / `on_merge` / `on_control`). Framework data prep (payload copies,
+`start_time` stamping) and message passing (scheduling, fan-out) run *outside*
+the timed region, so the numbers reflect genuine compute cost, not queue
+overhead.
+
+```python
+comp.exec_calls        # number of core-execution invocations
+comp.exec_time         # total wall-clock seconds in core execution
+comp.exec_mean         # mean per-call seconds
+comp.timing()          # -> ComponentTiming(name, calls, total, last, mean)
+
+system.timing_report() # -> [ComponentTiming, ...] sorted by total (desc)
+system.print_timing()  # formatted per-component table
+system.reset_timing()  # zero all counters
+```
+
+Timing is always on (a `perf_counter` pair per core call; negligible). See
+`examples/demo_timing.py`.
+
 ## Inspecting the event queue
 
 At any point during a run, `HeapScheduler` can dump the events and timestamps
@@ -261,6 +283,7 @@ python examples/demo_blocking.py           # blocking: queue vs drop while busy
 python examples/demo_jammer.py             # capstone: scan, detect pulses, jam @ 2.4 GHz
 python examples/demo_feedback.py           # closed loop: scan scheduler retunes filter
 python examples/demo_queue_inspect.py      # print the events/timestamps left on the queue
+python examples/demo_timing.py             # per-component core-execution wall-clock time
 ```
 
 The capstone `demo_jammer.py` ties essentially every feature together: an EW
