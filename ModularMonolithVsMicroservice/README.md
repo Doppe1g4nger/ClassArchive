@@ -11,24 +11,26 @@ and enriches one shared frame, then passes it to the next, the same way
 Unix pipes chain filters:
 
 ```
-IQ samples -> detector -> stats -> deinterleaver -> spectrogram -> jammer
+IQ samples -> detector -> spectrogram -> jammer -> stats -> deinterleaver
 ```
 
 - **detector** — amplitude-threshold pulse detection (reads the batch's raw
   samples, writes the pulses it found)
+- **spectrogram** — a small-bin magnitude spectrum estimate per batch
+- **jammer** — flags batches with sustained high-power duty cycle
 - **stats** — running summary statistics over detected pulses (count, mean
   peak amplitude, mean duration, mean pulse-repetition interval)
 - **deinterleaver** — groups pulses into candidate emitter tracks by PRI
-- **spectrogram** — a small-bin magnitude spectrum estimate per batch
-- **jammer** — flags batches with sustained high-power duty cycle
 
-Every stage after the first receives the frame the stage before it already
-touched; `stats` and `deinterleaver` read the pulses `detector` found,
-while `spectrogram` and `jammer` read the raw samples that have been
-riding along in the frame since the top of the chain, untouched by the
-stages in between. Small enough to read start to finish, but with enough
-sequential stages to show what "insert a module into the pipeline" costs
-in each architecture.
+The order isn't arbitrary: `detector`, `spectrogram`, and `jammer` are the
+three stages that read the batch's raw samples, so they're grouped first;
+`stats` and `deinterleaver` only need the pulses `detector` already found,
+so they run after. That grouping is what lets the microservice build drop
+the raw samples from the frame once `jammer` (the last of the three) is
+done with them, instead of carrying the largest field in the pipeline
+through hops that never touch it — see "Optimizations" below. Small enough
+to read start to finish, but with enough sequential stages to show what
+"insert a module into the pipeline" costs in each architecture.
 
 ## The point of the example
 
@@ -47,31 +49,36 @@ changes:
 | Deployment | ship one executable + five `.so` files, versioned together | ship/scale/deploy each service independently |
 
 The `pulse.PipelineFrame` envelope is what proves the point: it's the same
-message, carrying the same fields, at every link in the chain either way.
-What differs is what it has to go through to cross each architecture's
-stage boundary. `monolith_app`'s modules run in the same process and, as
-of this build, share one loaded copy of the generated protobuf code (see
-the shared `pulse_proto` library below), so each stage just mutates the
-frame in place through a plain function call — no serialize, no parse. The
-five microservices are separate processes with separate address spaces;
-there is no way to hand one a pointer into another's memory, so every link
-in the chain *must* serialize the frame onto a socket, even the fields a
-given stage never reads (see "Benchmark" below for what that costs).
-That's not an implementation gap in this demo, it's the actual,
+message type, defined once, at every link in the chain either way. What
+differs is what it has to go through to cross each architecture's stage
+boundary. `monolith_app`'s modules run in the same process and, as of this
+build, share one loaded copy of the generated protobuf code (see the
+shared `pulse_proto` library below), so each stage just mutates the frame
+in place through a plain function call — no serialize, no parse, and no
+reason to care what else is populated on the frame at the time. The five
+microservices are separate processes with separate address spaces; there
+is no way to hand one a pointer into another's memory, so every link in
+the chain *must* serialize the frame onto a socket. Unlike the monolith,
+that means each microservice *does* care what's still on the frame when
+it forwards — carrying a field no downstream stage will ever read is pure
+waste on a real wire, even though it's free in-process (see
+"Optimizations" below for how this build avoids that waste). That
+asymmetry is not an implementation gap in this demo, it's the actual,
 unavoidable cost of a real process boundary — which is exactly the
 trade-off this example exists to make visible.
 
 `detector_service` is the chain's producer: it generates the synthetic IQ
 stream and runs detection locally (same as the monolith's detector
-module), then sends the frame one hop downstream to `stats_service`. Each
-service after that — `stats_service`, `deinterleave_service`,
-`spectrogram_service` — is *both* a TCP server (accepting the connection
-from the stage before it) and a TCP client (connecting to the stage after
-it): it reads a frame, enriches its own field, and forwards the whole
-frame on. `jammer_service`, last in the chain, only accepts; it has
-nothing downstream to forward to. `monolith_app` runs the equivalent
-chain as five sequential function calls in a loop over the same
-in-memory frame.
+module), then sends the frame one hop downstream to `spectrogram_service`.
+Each service after that — `spectrogram_service`, `jammer_service`,
+`stats_service` — is *both* a TCP server (accepting the connection from
+the stage before it) and a TCP client (connecting to the stage after it):
+it reads a frame, enriches its own field, and forwards the frame on (after
+dropping whatever fields it knows nothing downstream needs — see
+"Optimizations"). `deinterleave_service`, last in the chain, only accepts;
+it has nothing downstream to forward to. `monolith_app` runs the
+equivalent chain as five sequential function calls in a loop over the
+same in-memory frame.
 
 ## Layout
 
@@ -94,19 +101,20 @@ monolith/                  Modular monolith build
                               (create/process/destroy -- process takes/mutates a PipelineFrame&)
   plugins/
     pulse_detector_plugin.cpp      -> libpulse_detector_plugin.so   (chain stage 1)
-    pulse_stats_plugin.cpp         -> libpulse_stats_plugin.so      (chain stage 2)
-    pulse_deinterleaver_plugin.cpp -> libpulse_deinterleaver_plugin.so (chain stage 3)
-    pulse_spectrogram_plugin.cpp   -> libpulse_spectrogram_plugin.so (chain stage 4)
-    pulse_jammer_plugin.cpp        -> libpulse_jammer_plugin.so     (chain stage 5)
+    pulse_spectrogram_plugin.cpp   -> libpulse_spectrogram_plugin.so (chain stage 2)
+    pulse_jammer_plugin.cpp        -> libpulse_jammer_plugin.so     (chain stage 3)
+    pulse_stats_plugin.cpp         -> libpulse_stats_plugin.so      (chain stage 4)
+    pulse_deinterleaver_plugin.cpp -> libpulse_deinterleaver_plugin.so (chain stage 5)
   host/monolith_main.cpp     Single executable; dlopen()s all five modules, runs them as a chain
 
 microservice/               Five-executable build, wired as a linear chain over TCP
   net/framing.{h,cpp}           Minimal length-prefixed protobuf-over-TCP framing
-  detector_service/main.cpp     Chain stage 1 (producer only): detects pulses, connects downstream to stats_service
-  stats_service/main.cpp        Chain stage 2: accepts detector_service, forwards to deinterleave_service
-  deinterleave_service/main.cpp Chain stage 3: accepts stats_service, forwards to spectrogram_service
-  spectrogram_service/main.cpp  Chain stage 4: accepts deinterleave_service, forwards to jammer_service
-  jammer_service/main.cpp       Chain stage 5 (sink only): accepts spectrogram_service, doesn't forward
+  detector_service/main.cpp     Chain stage 1 (producer only): detects pulses, connects downstream to spectrogram_service
+  spectrogram_service/main.cpp  Chain stage 2: accepts detector_service, forwards to jammer_service
+  jammer_service/main.cpp       Chain stage 3: accepts spectrogram_service, forwards to stats_service,
+                                  clears the raw IQ batch from the frame first (last stage that needs it)
+  stats_service/main.cpp        Chain stage 4: accepts jammer_service, forwards to deinterleave_service
+  deinterleave_service/main.cpp Chain stage 5 (sink only): accepts stats_service, doesn't forward
 
 scripts/run_monolith.sh       Build + run the monolith
 scripts/run_microservices.sh  Build + run the five-service chain
@@ -145,29 +153,30 @@ This produces, all in `build/bin/`:
 ```
 
 **Microservices** (five processes chained over TCP: `detector_service ->
-stats_service -> deinterleave_service -> spectrogram_service ->
-jammer_service`). Each listens at `base_port + offset` (`stats_service`
-at `+0`, `deinterleave_service` at `+1`, `spectrogram_service` at `+2`,
-`jammer_service` at `+3`) and, except for `jammer_service`, connects
-downstream to `base_port + offset + 1` at startup. Because each service
-(other than the producer) must connect downstream *before* it can accept
-upstream, they have to start in the **reverse** of data-flow order —
-`scripts/run_microservices.sh` handles this for you; doing it by hand
-means starting the five terminals below bottom-to-top.
+spectrogram_service -> jammer_service -> stats_service ->
+deinterleave_service`). Each listens at `base_port + offset`
+(`spectrogram_service` at `+0`, `jammer_service` at `+1`, `stats_service`
+at `+2`, `deinterleave_service` at `+3`) and, except for
+`deinterleave_service`, connects downstream to `base_port + offset + 1`
+at startup. Because each service (other than the producer) must connect
+downstream *before* it can accept upstream, they have to start in the
+**reverse** of data-flow order — `scripts/run_microservices.sh` handles
+this for you; doing it by hand means starting the five terminals below
+bottom-to-top.
 
 ```sh
 ./scripts/run_microservices.sh
-# or directly, in five terminals, started in this order (jammer first):
-./build/bin/jammer_service <base_port + 3>
-./build/bin/spectrogram_service <base_port + 2> <host> <base_port + 3>
-./build/bin/deinterleave_service <base_port + 1> <host> <base_port + 2>
-./build/bin/stats_service <base_port> <host> <base_port + 1>
+# or directly, in five terminals, started in this order (deinterleave first):
+./build/bin/deinterleave_service <base_port + 3>
+./build/bin/stats_service <base_port + 2> <host> <base_port + 3>
+./build/bin/jammer_service <base_port + 1> <host> <base_port + 2>
+./build/bin/spectrogram_service <base_port> <host> <base_port + 1>
 ./build/bin/detector_service <host> <base_port> [num_pulses]
 
-./build/bin/jammer_service 20054
-./build/bin/spectrogram_service 20053 127.0.0.1 20054
-./build/bin/deinterleave_service 20052 127.0.0.1 20053
-./build/bin/stats_service 20051 127.0.0.1 20052
+./build/bin/deinterleave_service 20054
+./build/bin/stats_service 20053 127.0.0.1 20054
+./build/bin/jammer_service 20052 127.0.0.1 20053
+./build/bin/spectrogram_service 20051 127.0.0.1 20052
 ./build/bin/detector_service 127.0.0.1 20051 1000
 ```
 
@@ -311,6 +320,55 @@ over one 4096-sample batch is far below anything visible in the printed
 summaries (each batch reseeds the phasor from scratch, so drift never
 accumulates across batches).
 
+### Avoiding unnecessary data on the wire
+
+Once the pipeline became a chain (see "The point of the example" above),
+every hop forwarded the *entire* `pulse::PipelineFrame` regardless of what
+the next stage actually read from it: `stats_service` and
+`deinterleave_service` never touch `frame.iq()`, yet it rode along to both
+of them anyway, and each stage's own summary field kept being serialized
+and sent to stages that had no use for it.
+
+Two changes fixed this:
+
+1. **Reordered the chain so the three raw-sample consumers run first.**
+   `detector`, `spectrogram`, and `jammer` all read `frame.iq()` — the
+   largest field in the pipeline by far — so they're grouped at the front
+   of the chain (`detector -> spectrogram -> jammer -> ...`) instead of
+   being split across it. That means there's exactly one point in the
+   chain where the raw samples are done being useful: right after
+   `jammer`, the last of the three.
+2. **Clear each field once nothing downstream needs it.**
+   `jammer_service` calls `frame.clear_iq()` before forwarding to
+   `stats_service`, since neither `stats_service` nor
+   `deinterleave_service` ever reads it. Every forwarding stage
+   (`spectrogram_service`, `jammer_service`, `stats_service`) also clears
+   its *own* summary field right after using it locally, since no stage
+   ever reads another stage's summary — only the reordering was needed
+   for `iq`, since it's read by three stages spread across the chain, but
+   each summary is written and consumed by exactly one.
+
+The effect is concrete and measurable: a `pulse::IQBatch` for one
+4096-sample batch serializes to about 94,087 bytes; a `PulseEventBatch`
+for the same batch, about 245 bytes. Before this fix, all four hops
+carried something close to the full ~94KB frame. After it, only the first
+two hops (`detector->spectrogram`, `spectrogram->jammer`) do — the last
+two hops (`jammer->stats`, `stats->deinterleave`) carry only `events`, at
+roughly 248 bytes. Over a full 1000-pulse run (128 batches), that's about
+24MB of raw samples no longer serialized, transmitted, and parsed on hops
+that never needed them.
+
+That's a large reduction in bytes moved, but a much smaller reduction in
+wall-clock time (see "Benchmark" below) — on a loopback socket, bandwidth
+is nowhere near the bottleneck; the fixed per-message cost (syscalls,
+buffer allocation, protobuf parse/serialize overhead per field) dominates
+far more than the marginal cost of a few more kilobytes per message does.
+This optimization would matter far more on a real network between real
+hosts, where bandwidth and per-byte latency are actually scarce — which
+is itself worth noting as a general lesson: "avoid sending unnecessary
+data" pays off in proportion to how expensive bytes actually are on the
+wire you're using, and loopback is about as cheap as wires get.
+
 ### Everything else
 
 Both architectures also share a few more ordinary tuning passes:
@@ -351,54 +409,65 @@ None of this changes behavior — see "Correctness" below.
 independent, fresh-process runs of each against a synthetic 1000-pulse
 input (`./scripts/benchmark.sh 50 1000`). Each run is timed end to end:
 process start to process exit for `monolith_app`; for the microservice
-chain, from *before* `jammer_service` (the first process started, since
-startup runs in reverse of data-flow order) is even launched to after all
-five processes have exited, so process-startup and connection-setup cost
-is counted symmetrically on both sides.
+chain, from *before* `deinterleave_service` (the first process started,
+since startup runs in reverse of data-flow order) is even launched to
+after all five processes have exited, so process-startup and
+connection-setup cost is counted symmetrically on both sides.
 
-Representative result with the chain topology (this machine, two separate
-50-run measurements landed in the same range):
+Representative result after reordering the chain and clearing unused
+fields (this machine, two separate 50-run measurements landed in the same
+range):
 
 ```
 Results over 50 runs, 1000 pulses/run:
 
-            modular monolith  min=26.3ms  median=27.0ms  mean=27.2ms  stdev=0.8ms  max=31.5ms
-               microservices  min=86.3ms  median=92.3ms  mean=93.7ms  stdev=6.4ms  max=123.3ms
+            modular monolith  min=26.6ms  median=27.0ms  mean=27.3ms  stdev=0.7ms  max=31.3ms
+               microservices  min=81.5ms  median=85.9ms  mean=87.5ms  stdev=6.8ms  max=122.1ms
 
-microservices mean is ~3.4x the modular monolith mean
+microservices mean is ~3.2x the modular monolith mean
 ```
 
-That's a noticeably wider gap than the fan-out topology this repo used
-before (~2.1x — see below), for two compounding reasons specific to a
-*chain*:
+That's an improvement over the unoptimized chain (~93.7ms mean, ~3.4x —
+see below), but a modest one relative to the ~24MB/run of raw samples the
+previous section shows this avoids moving. That's expected, not a sign
+the fix didn't work (correctness was reverified identically — see below):
+on a loopback socket, moving an extra few hundred KB across two hops costs
+low-single-digit milliseconds at most, so it was never going to be the
+dominant cost. What still dominates the microservice build's time,
+unchanged by this fix:
 
-1. **Sequential connection setup instead of parallel.** In the fan-out
-   design, `detector_service` opened all four downstream connections
-   itself, so they could all be waited on together. In a chain, each
-   service's downstream connection depends on the *previous* service
-   already being up, so the five processes and four TCP handshakes have
-   to come up one after another instead of concurrently — see
-   `scripts/run_microservices.sh`'s reverse-order startup. That's pure
-   added latency the fan-out topology didn't have.
-2. **Every hop forwards the whole frame, not just what it needs.**
-   `pulse::PipelineFrame` carries `iq` (the largest field, 4096
-   samples/batch) all the way from `detector_service` to `jammer_service`
-   — four serialize/parse round trips — even though only `detector`,
-   `spectrogram`, and `jammer` actually read it; `stats_service` and
-   `deinterleave_service` pay to move it along without ever touching it.
-   The fan-out design sent each consumer only the message type it
-   needed. A shared envelope makes the pipeline's wiring trivial (see
-   "The point of the example"), but it costs strictly more bytes on the
-   wire than point-to-point messages tailored per consumer would.
+1. **Sequential connection setup instead of parallel.** Each service's
+   downstream connection depends on the *previous* service already being
+   up (see `scripts/run_microservices.sh`'s reverse-order startup), so
+   five process starts and four TCP handshakes happen one after another
+   instead of concurrently. This was also true of the fan-out topology's
+   *accept* side, but fan-out let `detector_service` open all four of
+   *its* connections in parallel rather than daisy-chaining through four
+   intermediaries first.
+2. **Per-message fixed costs**, still paid twice as often on the two hops
+   that still carry the frame with `events` on it (`jammer->stats`,
+   `stats->deinterleave`) as they were before: a `recv()`/`send()` pair of
+   syscalls, a length-prefix parse, and a protobuf `ParseFromString`/
+   `SerializeToString` call each carry a fixed cost that doesn't scale
+   down just because the payload got smaller.
 
 The monolith is immune to both: its "connections" are function calls that
 either all succeed instantly or don't, and passing `frame` by reference
 between chain stages costs nothing extra no matter how many fields ride
-along unused.
+along unused — which is exactly why "avoid sending unnecessary data" is a
+microservices-specific optimization in this repo, not a general one.
 
-**With the fan-out topology** (detector_service as a hub sending directly
-to four independent consumers, before this became a linear chain), the
-same 5-app benchmark measured:
+**Before this optimization**, with the same chain topology but every hop
+forwarding the full frame regardless of what the next stage read, the
+benchmark measured:
+
+```
+            modular monolith  min=26.3ms  median=27.0ms  mean=27.2ms  stdev=0.8ms  max=31.5ms
+               microservices  min=86.3ms  median=92.3ms  mean=93.7ms  stdev=6.4ms  max=123.3ms
+```
+
+**Before the chain topology**, with `detector_service` as a hub sending
+directly to four independent consumers, the same 5-app benchmark measured:
 
 ```
             modular monolith  min=26.3ms  median=27.1ms  mean=27.5ms  stdev=1.2ms  max=33.5ms
@@ -437,5 +506,12 @@ both binaries at 6 pulses (the original default) and 1000 pulses and diff
 the printed output. The monolith and microservice builds have produced
 byte-identical summary statistics, spectrogram bins, jam-detection state,
 and deinterleaved tracks in every case, including after adding the three
-new apps, after the spectrogram phasor-rotation fix, and after converting
-the fan-out topology into a linear chain.
+new apps, after the spectrogram phasor-rotation fix, after converting the
+fan-out topology into a linear chain, and after reordering that chain and
+clearing unused fields between hops. Clearing a field a stage already
+consumed and copying its value into a local variable first (see
+`spectrogram_service`/`jammer_service`/`stats_service`'s `last_summary`
+pattern) is exactly the kind of change that's easy to get backwards --
+clear-then-read instead of read-then-clear silently zeroes out the value
+you meant to print -- so this one got the same before/after diff
+treatment as everything else.

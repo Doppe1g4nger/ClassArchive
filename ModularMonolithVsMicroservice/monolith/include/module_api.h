@@ -38,13 +38,26 @@
 // Every stage shares one signature now instead of five different ones.
 // That's a direct consequence of this being a linear chain rather than a
 // fan-out: every stage receives the same evolving pulse::PipelineFrame,
-// reads whatever fields it needs (iq, populated once at the top of the
-// chain; events, populated by the detector stage), and writes its own
-// field before the frame moves to the next stage. A stage that reads a
-// field an earlier stage hasn't populated yet is a wiring bug, not
-// something the type system catches -- see monolith_main.cpp and
+// reads whatever fields it needs, and writes its own field before the
+// frame moves to the next stage. A stage that reads a field an earlier
+// stage hasn't populated yet is a wiring bug, not something the type
+// system catches -- see monolith_main.cpp and
 // scripts/run_microservices.sh for the chain order both architectures
-// rely on: detector -> stats -> deinterleaver -> spectrogram -> jammer.
+// rely on: detector -> spectrogram -> jammer -> stats -> deinterleaver.
+//
+// That specific order isn't arbitrary: detector, spectrogram, and jammer
+// are the three stages that read frame.iq() (the largest field by far,
+// 4096 samples/batch), so they're grouped first. Once jammer -- the last
+// of the three -- has read it, the microservice build clears frame.iq()
+// before forwarding, so the last two hops (jammer->stats,
+// stats->deinterleaver) never carry the raw samples at all. Each stage
+// also clears its own summary field right after using it locally, since
+// no later stage ever reads an earlier stage's summary -- see
+// microservice/{spectrogram,jammer,stats}_service/main.cpp. The monolith
+// doesn't need any of this: passing frame by reference costs nothing
+// extra regardless of which fields are populated, so its modules never
+// clear anything. Only a real process boundary has to care what it's
+// carrying.
 extern "C" {
 
 typedef void* pulse_module_t;

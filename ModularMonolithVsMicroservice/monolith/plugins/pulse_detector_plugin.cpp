@@ -1,6 +1,6 @@
 // Built into libpulse_detector_plugin.so and dlopen()'d by monolith_app.
-// First stage of the pipeline chain (detector -> stats -> deinterleaver
-// -> spectrogram -> jammer). Wraps pulsecore::PulseDetector -- no
+// First stage of the pipeline chain (detector -> spectrogram -> jammer ->
+// stats -> deinterleaver). Wraps pulsecore::PulseDetector -- no
 // serialization, since this module and its host share one in-process
 // definition of every pulse:: type (see module_api.h).
 

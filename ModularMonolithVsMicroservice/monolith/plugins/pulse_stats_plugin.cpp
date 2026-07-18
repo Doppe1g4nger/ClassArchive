@@ -1,6 +1,6 @@
 // Built into libpulse_stats_plugin.so and dlopen()'d by monolith_app.
-// Second stage of the pipeline chain (detector -> stats -> deinterleaver
-// -> spectrogram -> jammer). Wraps pulsecore::PulseStatsAccumulator.
+// Fourth stage of the pipeline chain (detector -> spectrogram -> jammer
+// -> stats -> deinterleaver). Wraps pulsecore::PulseStatsAccumulator.
 
 #include <cstdio>
 
@@ -31,8 +31,8 @@ void pulse_module_destroy(pulse_module_t handle) {
   delete static_cast<StatsModule*>(handle);
 }
 
-// Second stage of the chain: reads frame->events (populated by the
-// detector stage) and writes frame->stats.
+// Reads frame->events (populated by the detector stage) and writes
+// frame->stats.
 void pulse_stage_process(pulse_module_t handle, pulse::PipelineFrame* frame) {
   auto* module = static_cast<StatsModule*>(handle);
   module->accumulator.Add(frame->events());

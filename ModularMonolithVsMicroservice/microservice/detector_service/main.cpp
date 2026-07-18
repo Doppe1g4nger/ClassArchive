@@ -1,11 +1,11 @@
 // detector_service: standalone executable running the exact same
 // pulsecore::PulseDetector used by libpulse_detector_plugin.so in the
-// monolith build. First stage of the pipeline chain (detector -> stats ->
-// deinterleaver -> spectrogram -> jammer): it's the chain's pure
+// monolith build. First stage of the pipeline chain (detector ->
+// spectrogram -> jammer -> stats -> deinterleaver): it's the chain's pure
 // producer, so it never listens -- it generates the synthetic IQ stream,
-// runs detection locally, and connects out to stats_service (the next
-// stage) as a plain TCP client, streaming one serialized PipelineFrame
-// per batch.
+// runs detection locally, and connects out to spectrogram_service (the
+// next stage) as a plain TCP client, streaming one serialized
+// PipelineFrame per batch.
 
 #include <unistd.h>
 
@@ -23,11 +23,12 @@ int main(int argc, char** argv) {
   const uint16_t next_port = argc > 2 ? static_cast<uint16_t>(std::atoi(argv[2])) : 50051;
   const int num_pulses = argc > 3 ? std::atoi(argv[3]) : 6;
 
-  std::printf("[detector_service] connecting to stats_service at %s:%u\n", next_host.c_str(),
+  std::printf("[detector_service] connecting to spectrogram_service at %s:%u\n", next_host.c_str(),
               next_port);
   const int downstream_fd = netutil::Connect(next_host, next_port);
   if (downstream_fd < 0) {
-    std::fprintf(stderr, "[detector_service] failed to connect (is stats_service running?)\n");
+    std::fprintf(stderr,
+                  "[detector_service] failed to connect (is spectrogram_service running?)\n");
     return 1;
   }
 

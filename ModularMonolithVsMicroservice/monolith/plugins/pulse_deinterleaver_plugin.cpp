@@ -1,6 +1,7 @@
 // Built into libpulse_deinterleaver_plugin.so and dlopen()'d by
-// monolith_app. Third stage of the pipeline chain (detector -> stats ->
-// deinterleaver -> spectrogram -> jammer). Wraps pulsecore::Deinterleaver.
+// monolith_app. Fifth and final stage of the pipeline chain (detector ->
+// spectrogram -> jammer -> stats -> deinterleaver). Wraps
+// pulsecore::Deinterleaver.
 
 #include <cstdio>
 

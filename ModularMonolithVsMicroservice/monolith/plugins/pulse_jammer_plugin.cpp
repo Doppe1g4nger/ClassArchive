@@ -1,6 +1,10 @@
 // Built into libpulse_jammer_plugin.so and dlopen()'d by monolith_app.
-// Fifth and final stage of the pipeline chain (detector -> stats ->
-// deinterleaver -> spectrogram -> jammer). Wraps pulsecore::JammerDetector.
+// Third stage of the pipeline chain (detector -> spectrogram -> jammer ->
+// stats -> deinterleaver) -- the last of the three stages that read
+// frame.iq(), which is why it's grouped here instead of at the end: the
+// microservice build clears frame.iq() right after this stage runs (see
+// microservice/jammer_service/main.cpp), since nothing downstream needs
+// it. Wraps pulsecore::JammerDetector.
 
 #include <cstdio>
 
@@ -35,8 +39,7 @@ void pulse_module_destroy(pulse_module_t handle) {
 }
 
 // Reads frame->iq (populated once, before the chain starts) and writes
-// frame->jam. By the time the frame reaches this last stage it carries
-// every earlier stage's output too.
+// frame->jam.
 void pulse_stage_process(pulse_module_t handle, pulse::PipelineFrame* frame) {
   auto* module = static_cast<JammerModule*>(handle);
   module->detector.Process(frame->iq(), frame->mutable_jam());

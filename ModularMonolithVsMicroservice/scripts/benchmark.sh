@@ -49,16 +49,16 @@ wait_for_port() {
   return 1
 }
 
-echo "== microservices (detector -> stats -> deinterleave -> spectrogram -> jammer chain) =="
+echo "== microservices (detector -> spectrogram -> jammer -> stats -> deinterleave chain) =="
 for i in $(seq 1 "$RUNS"); do
   # Each run gets its own block of 4 ports (base + i*10 + offset 0..3) so
   # consecutive runs can't collide even if a prior run's sockets are
   # still winding down.
   base=$((BASE_PORT + i * 10))
-  port_stats=$((base))
-  port_deinterleave=$((base + 1))
-  port_spectrogram=$((base + 2))
-  port_jammer=$((base + 3))
+  port_spectrogram=$((base))
+  port_jammer=$((base + 1))
+  port_stats=$((base + 2))
+  port_deinterleave=$((base + 3))
 
   # Timer starts before any service is even launched, so their process
   # startup and library load count toward the total -- the same way
@@ -73,15 +73,7 @@ for i in $(seq 1 "$RUNS"); do
   # constraint as scripts/run_microservices.sh). Each wait_for_port call
   # is itself counted as part of the microservice architecture's cost:
   # it's synchronization overhead the monolith never pays.
-  "$BIN/jammer_service" "$port_jammer" >/dev/null 2>&1 &
-  pid_jammer=$!
-  wait_for_port "$port_jammer"
-
-  "$BIN/spectrogram_service" "$port_spectrogram" 127.0.0.1 "$port_jammer" >/dev/null 2>&1 &
-  pid_spectrogram=$!
-  wait_for_port "$port_spectrogram"
-
-  "$BIN/deinterleave_service" "$port_deinterleave" 127.0.0.1 "$port_spectrogram" >/dev/null 2>&1 &
+  "$BIN/deinterleave_service" "$port_deinterleave" >/dev/null 2>&1 &
   pid_deinterleave=$!
   wait_for_port "$port_deinterleave"
 
@@ -89,8 +81,16 @@ for i in $(seq 1 "$RUNS"); do
   pid_stats=$!
   wait_for_port "$port_stats"
 
-  "$BIN/detector_service" 127.0.0.1 "$port_stats" "$NUM_PULSES" >/dev/null
-  wait "$pid_stats" "$pid_deinterleave" "$pid_spectrogram" "$pid_jammer"
+  "$BIN/jammer_service" "$port_jammer" 127.0.0.1 "$port_stats" >/dev/null 2>&1 &
+  pid_jammer=$!
+  wait_for_port "$port_jammer"
+
+  "$BIN/spectrogram_service" "$port_spectrogram" 127.0.0.1 "$port_jammer" >/dev/null 2>&1 &
+  pid_spectrogram=$!
+  wait_for_port "$port_spectrogram"
+
+  "$BIN/detector_service" 127.0.0.1 "$port_spectrogram" "$NUM_PULSES" >/dev/null
+  wait "$pid_spectrogram" "$pid_jammer" "$pid_stats" "$pid_deinterleave"
   end=$(date +%s.%N)
   echo "$end - $start" | bc >> "$MICRO_TIMES"
 done

@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Builds (if needed) and runs the microservice variant: five separate
 # executables wired as a linear chain over TCP with length-prefixed
-# protobuf messages -- detector_service -> stats_service ->
-# deinterleave_service -> spectrogram_service -> jammer_service. Each
-# middle service is both a TCP server (accepting the stage before it) and
-# a TCP client (connecting to the stage after it), so every service
-# except the last must connect downstream *before* it can accept
+# protobuf messages -- detector_service -> spectrogram_service ->
+# jammer_service -> stats_service -> deinterleave_service. The first
+# three all read the raw IQ batch, so they're grouped together and each
+# hop after jammer_service drops it from the frame before forwarding
+# (see microservice/jammer_service/main.cpp) -- the point being to avoid
+# serializing and transmitting data no downstream stage will ever read.
+#
+# Each middle service is both a TCP server (accepting the stage before
+# it) and a TCP client (connecting to the stage after it), so every
+# service except the last must connect downstream *before* it can accept
 # upstream, and every service except the first (a pure producer) must
 # have its downstream target already listening. That forces startup in
-# the reverse of data-flow order: jammer, spectrogram, deinterleave,
-# stats, detector.
+# the reverse of data-flow order: deinterleave, stats, jammer,
+# spectrogram, detector.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,11 +29,11 @@ cmake --build build -j"$(nproc)" >/dev/null
 BASE_PORT="${1:-20051}"
 NUM_PULSES="${2:-6}"
 
-# Chain order (data flow): stats=+0, deinterleave=+1, spectrogram=+2, jammer=+3.
-PORT_STATS=$((BASE_PORT))
-PORT_DEINTERLEAVE=$((BASE_PORT + 1))
-PORT_SPECTROGRAM=$((BASE_PORT + 2))
-PORT_JAMMER=$((BASE_PORT + 3))
+# Chain order (data flow): spectrogram=+0, jammer=+1, stats=+2, deinterleave=+3.
+PORT_SPECTROGRAM=$((BASE_PORT))
+PORT_JAMMER=$((BASE_PORT + 1))
+PORT_STATS=$((BASE_PORT + 2))
+PORT_DEINTERLEAVE=$((BASE_PORT + 3))
 
 BIN=./build/bin
 PIDS=()
@@ -55,15 +60,7 @@ wait_for_port() {
 
 # Reverse of data-flow order: each service's downstream target must
 # already be listening before it starts.
-"$BIN/jammer_service" "$PORT_JAMMER" &
-PIDS+=("$!")
-wait_for_port "$PORT_JAMMER"
-
-"$BIN/spectrogram_service" "$PORT_SPECTROGRAM" 127.0.0.1 "$PORT_JAMMER" &
-PIDS+=("$!")
-wait_for_port "$PORT_SPECTROGRAM"
-
-"$BIN/deinterleave_service" "$PORT_DEINTERLEAVE" 127.0.0.1 "$PORT_SPECTROGRAM" &
+"$BIN/deinterleave_service" "$PORT_DEINTERLEAVE" &
 PIDS+=("$!")
 wait_for_port "$PORT_DEINTERLEAVE"
 
@@ -71,7 +68,15 @@ wait_for_port "$PORT_DEINTERLEAVE"
 PIDS+=("$!")
 wait_for_port "$PORT_STATS"
 
-"$BIN/detector_service" 127.0.0.1 "$PORT_STATS" "$NUM_PULSES"
+"$BIN/jammer_service" "$PORT_JAMMER" 127.0.0.1 "$PORT_STATS" &
+PIDS+=("$!")
+wait_for_port "$PORT_JAMMER"
+
+"$BIN/spectrogram_service" "$PORT_SPECTROGRAM" 127.0.0.1 "$PORT_JAMMER" &
+PIDS+=("$!")
+wait_for_port "$PORT_SPECTROGRAM"
+
+"$BIN/detector_service" 127.0.0.1 "$PORT_SPECTROGRAM" "$NUM_PULSES"
 
 for pid in "${PIDS[@]}"; do
   wait "$pid"

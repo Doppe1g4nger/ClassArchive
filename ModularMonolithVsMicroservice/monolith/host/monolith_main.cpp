@@ -1,14 +1,20 @@
 // monolith_app: a single process/executable that dlopen()s five
 // pulse-processing modules at startup and runs them as a linear chain --
-// detector -> stats -> deinterleaver -> spectrogram -> jammer -- each
+// detector -> spectrogram -> jammer -> stats -> deinterleaver -- each
 // stage reading/writing one pulse::PipelineFrame passed by reference, no
 // serialization, since every module is built from the same
 // pulse.pb.h/pulse_proto as the host (see module_api.h for why that makes
-// it safe). Compare with microservice/{detector_service,stats_service,
-// deinterleave_service,spectrogram_service,jammer_service}, which run the
-// identical core algorithms as five separate processes chained over TCP
-// sockets -- each one both a server to the stage before it and a client
-// to the stage after it -- because they don't share an address space.
+// it safe). Unlike the microservice build, this chain never needs to drop
+// unread fields from the frame between stages -- passing a reference
+// costs the same regardless of what's populated -- so the ordering here
+// is purely for consistency with microservice/'s wiring, not a
+// performance requirement. Compare with
+// microservice/{detector_service,spectrogram_service,jammer_service,
+// stats_service,deinterleave_service}, which run the identical core
+// algorithms as five separate processes chained over TCP sockets -- each
+// one both a server to the stage before it and a client to the stage
+// after it -- because they don't share an address space, and which
+// therefore do care what's still in the frame at each hop.
 
 #include <dlfcn.h>
 
@@ -62,12 +68,12 @@ int main(int argc, char** argv) {
   // before it in this list have already written into the frame.
   std::vector<LoadedModule> chain = {
       LoadModule(plugin_dir + "/libpulse_detector_plugin.so", "threshold=6.0,sample_rate=1000000"),
-      LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=1000000"),
-      LoadModule(plugin_dir + "/libpulse_deinterleaver_plugin.so",
-                 "sample_rate=1000000,pri_tolerance=0.000005"),
       LoadModule(plugin_dir + "/libpulse_spectrogram_plugin.so", "sample_rate=1000000,num_bins=8"),
       LoadModule(plugin_dir + "/libpulse_jammer_plugin.so",
                  "power_threshold=20.0,duty_cycle_threshold=0.5"),
+      LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=1000000"),
+      LoadModule(plugin_dir + "/libpulse_deinterleaver_plugin.so",
+                 "sample_rate=1000000,pri_tolerance=0.000005"),
   };
 
   pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/1000000.0, num_pulses);
@@ -88,22 +94,6 @@ int main(int argc, char** argv) {
   std::printf("[monolith_app] processed %d IQ batches through a dynamically-linked chain of %zu modules\n",
               batches, chain.size());
 
-  const pulse::PulseSummary& stats = frame.stats();
-  std::printf(
-      "[monolith_app] stats: pulses=%llu mean_peak=%.3f mean_dur_us=%.2f mean_pri_us=%.2f "
-      "min_peak=%.3f max_peak=%.3f\n",
-      static_cast<unsigned long long>(stats.pulse_count()), stats.mean_peak_amplitude(),
-      stats.mean_duration_seconds() * 1e6, stats.mean_pri_seconds() * 1e6,
-      stats.min_peak_amplitude(), stats.max_peak_amplitude());
-
-  const pulse::DeinterleaveSummary& tracks = frame.deinterleave();
-  std::printf("[monolith_app] deinterleaver: %d track(s)\n", tracks.tracks_size());
-  for (const pulse::EmitterTrack& track : tracks.tracks()) {
-    std::printf("[monolith_app]   track %u: pulses=%llu estimated_pri_us=%.2f mean_peak=%.3f\n",
-                track.track_id(), static_cast<unsigned long long>(track.pulse_count()),
-                track.estimated_pri_seconds() * 1e6, track.mean_peak_amplitude());
-  }
-
   const pulse::SpectrogramSummary& spectrogram = frame.spectrogram();
   std::printf("[monolith_app] spectrogram: %d bins, %.1f Hz spacing, %llu frames\n",
               spectrogram.max_magnitude_size(), spectrogram.bin_hz(),
@@ -120,6 +110,22 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(jam.batches_flagged()),
       static_cast<unsigned long long>(jam.batches_total()), jam.max_duty_cycle(),
       jam.max_mean_power());
+
+  const pulse::PulseSummary& stats = frame.stats();
+  std::printf(
+      "[monolith_app] stats: pulses=%llu mean_peak=%.3f mean_dur_us=%.2f mean_pri_us=%.2f "
+      "min_peak=%.3f max_peak=%.3f\n",
+      static_cast<unsigned long long>(stats.pulse_count()), stats.mean_peak_amplitude(),
+      stats.mean_duration_seconds() * 1e6, stats.mean_pri_seconds() * 1e6,
+      stats.min_peak_amplitude(), stats.max_peak_amplitude());
+
+  const pulse::DeinterleaveSummary& tracks = frame.deinterleave();
+  std::printf("[monolith_app] deinterleaver: %d track(s)\n", tracks.tracks_size());
+  for (const pulse::EmitterTrack& track : tracks.tracks()) {
+    std::printf("[monolith_app]   track %u: pulses=%llu estimated_pri_us=%.2f mean_peak=%.3f\n",
+                track.track_id(), static_cast<unsigned long long>(track.pulse_count()),
+                track.estimated_pri_seconds() * 1e6, track.mean_peak_amplitude());
+  }
 
   for (LoadedModule& stage : chain) {
     stage.destroy(stage.instance);

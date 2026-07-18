@@ -1,6 +1,7 @@
 // Built into libpulse_spectrogram_plugin.so and dlopen()'d by
-// monolith_app. Fourth stage of the pipeline chain (detector -> stats ->
-// deinterleaver -> spectrogram -> jammer). Wraps pulsecore::SpectrogramAnalyzer.
+// monolith_app. Second stage of the pipeline chain (detector ->
+// spectrogram -> jammer -> stats -> deinterleaver). Wraps
+// pulsecore::SpectrogramAnalyzer.
 
 #include <cstdio>
 
