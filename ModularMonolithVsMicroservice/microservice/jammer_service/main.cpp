@@ -6,7 +6,7 @@
 // spectrogram_service.
 //
 // This is the last of the three stages that read frame.iq() (the
-// largest field by far -- 4096 samples/batch), which is exactly why
+// largest field by far -- 10,000 samples/batch), which is exactly why
 // detector, spectrogram, and jammer are grouped first in the chain: once
 // this stage is done with it, nothing downstream (stats_service,
 // deinterleave_service) ever reads it again, so it's cleared right here

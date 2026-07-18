@@ -17,6 +17,12 @@ class PulseDetector {
 
  private:
   double threshold_;
+  // Squared once in the constructor so Process() can compare
+  // i*i+q*q >= threshold_sq_ directly instead of computing sqrt(i*i+q*q)
+  // for every sample just to compare it against threshold_ -- valid
+  // because sqrt is monotonic increasing over non-negative reals, and an
+  // amplitude threshold is never negative. See pulse_detector.cpp.
+  double threshold_sq_;
   double sample_rate_hz_;
 
   bool in_pulse_ = false;

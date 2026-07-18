@@ -17,12 +17,15 @@ class JammerDetector:
         samples = batch.samples
         n = len(samples)
         if n > 0:
+            power_threshold = self._power_threshold
             power_sum = 0.0
             over_threshold = 0
             for s in samples:
-                power = s.i * s.i + s.q * s.q
+                si = s.i
+                sq = s.q
+                power = si * si + sq * sq
                 power_sum += power
-                if power >= self._power_threshold:
+                if power >= power_threshold:
                     over_threshold += 1
 
             mean_power = power_sum / n
@@ -31,8 +34,10 @@ class JammerDetector:
             self._batches_total += 1
             if duty_cycle >= self._duty_cycle_threshold:
                 self._batches_flagged += 1
-            self._max_duty_cycle = max(self._max_duty_cycle, duty_cycle)
-            self._max_mean_power = max(self._max_mean_power, mean_power)
+            if duty_cycle > self._max_duty_cycle:
+                self._max_duty_cycle = duty_cycle
+            if mean_power > self._max_mean_power:
+                self._max_mean_power = mean_power
 
         out.Clear()
         out.batches_total = self._batches_total

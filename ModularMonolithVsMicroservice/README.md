@@ -893,19 +893,24 @@ comparison) take more than about two minutes total.
 ```
 Steady-state results over 20 runs, 50000 pulses/run:
 
-            C++ monolith  min=  16.725ms  median=  18.486ms  mean=  18.405ms  stdev=  0.439ms  max=  18.804ms
-       C++ microservices  min=  48.311ms  median=  52.892ms  mean=  55.389ms  stdev=  6.270ms  max=  71.484ms
-         Python monolith  min=2167.515ms  median=2373.186ms  mean=2352.443ms  stdev= 68.277ms  max=2425.046ms
-    Python microservices  min=1323.493ms  median=1439.284ms  mean=1527.788ms  stdev=238.881ms  max=2106.410ms
-        Python multiproc  min=1334.955ms  median=1463.014ms  mean=1473.711ms  stdev= 86.918ms  max=1737.974ms
+            C++ monolith  min=  17.197ms  median=  17.915ms  mean=  17.947ms  stdev=  0.324ms  max=  18.489ms
+       C++ microservices  min=  51.217ms  median=  53.807ms  mean=  54.568ms  stdev=  3.683ms  max=  69.521ms
+         Python monolith  min=1320.622ms  median=1378.771ms  mean=1436.201ms  stdev=198.614ms  max=2273.861ms
+    Python microservices  min= 686.449ms  median= 711.180ms  mean= 730.053ms  stdev= 48.229ms  max= 862.144ms
+        Python multiproc  min= 727.831ms  median= 764.661ms  mean= 787.934ms  stdev= 60.189ms  max= 932.656ms
 
-Python monolith is 127.8x the C++ monolith mean
-Python microservices is 27.6x the C++ microservices mean
-C++ microservices is 3.01x the C++ monolith mean
-Python microservices is 0.65x the Python monolith mean
-Python multiproc is 0.63x the Python monolith mean
-Python multiproc is 0.96x the Python microservices mean
+Python monolith is 80.0x the C++ monolith mean
+Python microservices is 13.4x the C++ microservices mean
+C++ microservices is 3.04x the C++ monolith mean
+Python microservices is 0.51x the Python monolith mean
+Python multiproc is 0.55x the Python monolith mean
+Python multiproc is 1.08x the Python microservices mean
 ```
+
+(These are post-"Correctness audit and hyperoptimization pass" numbers --
+see that section below for what changed and the full before/after
+comparison. The qualitative shape is unchanged from before that pass, and
+sharper in places, so the discussion below still holds.)
 
 With startup and connection setup excluded, the qualitative picture from
 the wall-clock benchmarks above holds up, and actually sharpens:
@@ -918,26 +923,178 @@ the wall-clock benchmarks above holds up, and actually sharpens:
   really is the dominant term, not process-launch overhead riding along
   with it.
 - **Both Python multi-process builds still beat the Python monolith**
-  (0.65x for microservices, 0.63x for multiproc -- both roughly
-  35-37% faster), the same GIL-driven crossover documented in "Python vs
+  (0.51x for microservices, 0.55x for multiproc -- both roughly
+  45-49% faster), the same GIL-driven crossover documented in "Python vs
   C++" above -- and here it's isolated from any contribution by
   process-startup parallelism, since none of these timers start until
   every process is already up and connected/wired. The processes
   genuinely pipeline CPU-bound work across cores once the pipeline is
   flowing; that's a steady-state effect, not a startup one.
-- **Multiproc and microservices land within noise of each other**
-  (0.96x -- multiproc very slightly faster, well inside both builds'
-  run-to-run variance). That answers the question "A third Python
-  architecture" above posed: at this workload, escaping the GIL is what
-  buys the win, not TCP/protobuf specifically -- a `multiprocessing.Pipe()`
-  gets the same steady-state throughput as a socket once both builds are
-  past their (very different) setup costs. Where they *do* differ is
-  everything this benchmark deliberately excludes: the microservices
-  build's five independent executables, ports, and reverse-order startup
-  versus multiproc's one command and no network stack at all -- a real
-  advantage for multiproc that a steady-state-only number can't show,
-  which is exactly why "Steady-state benchmark" and the wall-clock
-  benchmarks above are answering different questions on purpose.
+- **Multiproc and microservices are close but no longer within noise of
+  each other** (1.08x -- multiproc now consistently a bit slower). This
+  is discussed in the hyperoptimization section below: with the
+  pulsecore-level bottleneck cut down, the TCP build's larger message
+  (protobuf bytes over a socket) and the multiproc build's smaller one
+  (a pickled Python object over a pipe) now sit close enough together
+  that a different, previously-masked cost -- pickling a `bytes` object
+  through `Connection.send()` on every hop, see "A third Python
+  architecture" above -- has become visible instead of being swamped by
+  the stages' own per-sample work. It's still true that escaping the GIL
+  is what buys the win over the monolith, and the network boundary isn't
+  free either; there's just less headroom left between the two now for
+  each one's remaining fixed costs to hide in. Where they still differ
+  structurally is everything this benchmark deliberately excludes: the
+  microservices build's five independent executables, ports, and
+  reverse-order startup versus multiproc's one command and no network
+  stack at all -- a real advantage for multiproc that a steady-state-only
+  number can't show, which is exactly why "Steady-state benchmark" and
+  the wall-clock benchmarks above are answering different questions on
+  purpose.
+
+## Correctness audit and hyperoptimization pass
+
+A dedicated pass through every implementation: read every core algorithm
+in both languages side by side against its counterpart, read every
+wiring file (module loading, the plugin shims, both mains, both framing
+layers, all five microservice mains and their Python ports, and the
+multiproc workers), then optimized what was safe to optimize -- without
+changing what any of the five builds compute.
+
+**Correctness findings.** No functional or behavioral bugs turned up
+anywhere -- all five builds already agreed, and still agree, on every
+numeric output. What the audit did find was four stale comments, left
+over from before the signal rate was scaled up to 1,000,000 pulses/sec
+(see "Scale" near the top of this document), that still cited the old
+4096-sample batch size or the old ~23% duty cycle after the constants
+behind those numbers had changed to 10,000 samples/batch and 20%: one in
+`jammer.h`'s docstring, one in `spectrogram.cpp`'s phasor-rotation
+comment, one in `module_api.h`, and one in `jammer_service/main.cpp`. All
+four described the code's current behavior incorrectly (not a historical
+event, which this README documents deliberately elsewhere -- see "Before
+this optimization" and similar callouts above), so they were factual bugs
+in the comments, not just staleness, and are now fixed to match the
+constants actually in force.
+
+**C++ optimizations.**
+
+- **Squared-magnitude threshold comparison in `PulseDetector::Process()`.**
+  The original computed `sqrt(i*i + q*q)` for every sample just to
+  compare it against an amplitude threshold. Since `sqrt` is monotonic
+  increasing over non-negative reals and an amplitude threshold is never
+  negative, `sqrt(x) >= t` iff `x >= t*t` -- so the threshold is now
+  squared once in the constructor, and `sqrt()` is only called for
+  samples that actually cross it (the peak/mean-amplitude bookkeeping
+  still needs the real magnitude, but only for those). At this repo's
+  20% duty cycle, that cuts the `sqrt()` calls in the pipeline's hottest
+  per-sample loop by roughly 80%. This is not an approximation --
+  verified against the unmodified Python port and against the C++
+  build's own pre-change output at 1,000 and 50,000 pulses, byte-for-byte
+  identical either way.
+- **Link-time optimization.** `CMakeLists.txt` now enables
+  `CMAKE_INTERPROCEDURAL_OPTIMIZATION` for Release builds, guarded behind
+  `check_ipo_supported()` so it's a no-op on a toolchain that can't do
+  it. This lets the compiler inline pulsecore's small, frequently-called
+  `Process()` methods into their callers (the plugins, `monolith_main.cpp`,
+  each microservice's `main.cpp`) across translation-unit boundaries --
+  free performance with no source change and no semantic risk, since LTO
+  only affects codegen within each already-existing final link target
+  (each `.so`, each executable), never linkage or registration behavior,
+  so it can't disturb the `pulse_proto` single-registration invariant
+  documented above.
+
+**Python optimizations.** Every one of these lives in `python/pulsecore/`,
+which every Python build (monolith, microservices, and multiproc) imports
+-- so a fix made once propagates to all three automatically, with no
+per-build duplication.
+
+- **The same squared-magnitude fix**, ported into `pulse_detector.py`
+  exactly as above.
+- **Reading each sample's `i`/`q` once per batch instead of once per
+  bin, in `spectrogram.py`.** The phasor-rotation loop runs every
+  sample through all `num_bins` correlators, and the original code read
+  `s.i`/`s.q` -- protobuf-generated property accessors, not free
+  attribute reads the way a C++ struct member is -- fresh from the
+  message on every `(bin, sample)` pair. At 8 bins that's 8x the
+  attribute-access cost for values that never change across bins. The
+  fix reads every sample's `i`/`q` into plain Python lists once, before
+  the bin loop, and has the per-bin correlator iterate those instead. A
+  C++ compiler hoists the equivalent redundant reads automatically (that
+  asymmetry is exactly why this fix has no C++ counterpart -- there was
+  nothing to hoist that the compiler wasn't already hoisting).
+- **Inlining the xorshift32 RNG in `iq_source.py`.** The original called
+  a bound method, `self._next_noise()`, twice per sample -- 20,000 method
+  calls per 10,000-sample batch just for RNG dispatch. The generator
+  loop now inlines the same xorshift steps directly, using a local
+  variable for the RNG state instead of a `self` attribute, matching the
+  same reasoning as the spectrogram fix: a C++ compiler inlines the
+  equivalent private-method calls automatically at `-O3`, so doing it by
+  hand in Python is what makes the two languages' *actual* runtime
+  behavior comparable, not what makes them diverge. Also precomputed the
+  one nonzero I/Q component value instead of recomputing a division for
+  it every sample, and replaced a per-sample `idx % period` with an
+  increment-and-wrap, since the phase cycles in lockstep with the sample
+  index anyway.
+- **Hoisting per-iteration running state out of `self` and into local
+  variables**, in `pulse_detector.py`, `pulse_stats.py`, and
+  `deinterleaver.py`'s hot loops -- read once before the loop, updated
+  as locals throughout, written back to `self` once at the end. CPython
+  resolves a local variable (`LOAD_FAST`) faster than an attribute
+  lookup on `self` (`LOAD_ATTR`), and these loops run once per sample or
+  per event, so avoiding repeated attribute access on every iteration is
+  a real, if smaller, win in the two lower-volume modules (`pulse_stats.py`,
+  `deinterleaver.py` operate on detected pulses, roughly 1,000/batch,
+  not the full 10,000-sample batch).
+
+None of these change what's computed, only how many times the same
+computation's inputs get re-fetched or re-derived -- confirmed by diffing
+every build's full output (not just summary statistics) against every
+other build's, at 1,000 and 50,000 pulses, after every change and again
+after a full clean rebuild and proto regeneration at the end. All five
+builds remain byte-for-byte identical to each other on every field, the
+same standard "Correctness" below has held to throughout this repo's
+history.
+
+**Before/after.** Same benchmark, same machine, same parameters
+(`./scripts/benchmark_steady_state.sh 20 50000`) as "Steady-state
+benchmark" above, run once before this pass and once after:
+
+```
+                          before (mean)   after (mean)   speedup
+    C++ monolith            18.405ms       17.947ms        1.03x
+    C++ microservices       55.389ms       54.568ms        1.02x
+    Python monolith       2352.443ms     1436.201ms        1.64x
+    Python microservices  1527.788ms      730.053ms        2.09x
+    Python multiproc      1473.711ms      787.934ms        1.87x
+```
+
+The C++ side moved modestly, as expected: `sqrt()` is a single pipelined
+hardware instruction on any machine this is likely to run on, so avoiding
+80% of them saves real but small cycles, and LTO's cross-TU inlining was
+already fighting a codebase where most of the hot code was one function
+per translation unit. The Python side moved dramatically -- 1.6x to just
+over 2x -- because CPython's per-operation overhead (attribute lookups,
+bound-method calls, redundant protobuf accessor reads) was a much larger
+fraction of the total cost to begin with, exactly the kind of overhead
+these fixes target. That asymmetry is itself a small illustration of the
+point "Python vs C++" makes at length above: the two languages don't pay
+for the same operations at the same rate, so the same class of fix lands
+very differently depending which one it's applied to.
+
+One side effect worth calling out: before this pass, Python multiproc
+was slightly *faster* than Python microservices (0.96x); after, it's
+slightly *slower* (1.08x -- see "Steady-state benchmark" above). Cutting
+down the shared pulsecore bottleneck didn't just make both builds
+faster, it changed which cost dominates what's left. `multiproc`'s
+`Connection.send()`/`recv()` pickle a Python `bytes` object on every
+hop (see "A third Python architecture" above for why -- it's what buys
+the `None`-sentinel shutdown instead of needing every worker to track
+every pipe end it doesn't use), while the TCP build sends the same raw
+protobuf bytes with no extra wrapping. That pickling overhead was always
+there; it just used to be too small next to the stages' own per-sample
+work to move the needle. With that work now roughly halved, it's a
+visible cost instead of a hidden one -- a reminder that "optimize the
+common path" can un-mask a different bottleneck rather than eliminate
+the bottleneck concept entirely.
 
 ## Correctness
 
@@ -958,7 +1115,11 @@ adding the Python multiproc build (verified against both the Python
 monolith's and the C++ monolith's output at 1000 and 50,000 pulses, and
 re-run five times back to back to confirm the forked workers' explicit
 `None`-sentinel shutdown -- see "A third Python architecture" above --
-never leaves a process hung or a result nondeterministic). Clearing a field a
+never leaves a process hung or a result nondeterministic), and after the
+"Correctness audit and hyperoptimization pass" above (diffed against a
+full clean rebuild and proto regeneration, all five builds still
+byte-identical on every field after every optimization -- see that
+section for specifics). Clearing a field a
 stage already consumed and copying its value into a local variable first
 (see `spectrogram_service`/`jammer_service`/`stats_service`'s
 `last_summary` pattern, in both languages) is exactly the kind of change

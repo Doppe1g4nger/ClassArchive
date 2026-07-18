@@ -30,6 +30,25 @@ class SpectrogramAnalyzer:
         n = len(samples)
         if n > 0:
             first_sample_index = samples[0].sample_index
+
+            # Read every sample's i/q out of the protobuf message exactly
+            # once, into plain Python floats, instead of once per bin --
+            # the loop below runs this batch's samples through all
+            # num_bins correlators, and s.i/s.q are protobuf-generated
+            # property accessors, not free attribute reads the way a C++
+            # struct member is. Re-reading them from the message on every
+            # (bin, sample) pair means num_bins times the attribute-access
+            # cost for no benefit, since the values never change across
+            # bins; a C++ compiler would hoist this automatically for an
+            # inlined getter, CPython won't, so it's done by hand here.
+            i_vals = [s.i for s in samples]
+            q_vals = [s.q for s in samples]
+            max_magnitude = self._max_magnitude
+            sum_magnitude = self._sum_magnitude
+            cos = math.cos
+            sin = math.sin
+            sqrt = math.sqrt
+
             for b in range(self._num_bins):
                 freq_hz = (b + 0.5) * self._bin_hz
                 omega = 2.0 * _PI * freq_hz / self._sample_rate_hz
@@ -39,26 +58,26 @@ class SpectrogramAnalyzer:
                 # instead of recomputing cos()/sin() from scratch each
                 # time -- see the module docstring.
                 start_phase = omega * first_sample_index
-                rot_re = math.cos(start_phase)
-                rot_im = -math.sin(start_phase)
-                step_re = math.cos(omega)
-                step_im = -math.sin(omega)
+                rot_re = cos(start_phase)
+                rot_im = -sin(start_phase)
+                step_re = cos(omega)
+                step_im = -sin(omega)
 
                 re = 0.0
                 im = 0.0
-                for s in samples:
-                    re += s.i * rot_re - s.q * rot_im
-                    im += s.i * rot_im + s.q * rot_re
+                for si, qi in zip(i_vals, q_vals):
+                    re += si * rot_re - qi * rot_im
+                    im += si * rot_im + qi * rot_re
 
                     next_re = rot_re * step_re - rot_im * step_im
                     next_im = rot_re * step_im + rot_im * step_re
                     rot_re = next_re
                     rot_im = next_im
 
-                magnitude = math.sqrt(re * re + im * im) / n
-                if magnitude > self._max_magnitude[b]:
-                    self._max_magnitude[b] = magnitude
-                self._sum_magnitude[b] += magnitude
+                magnitude = sqrt(re * re + im * im) / n
+                if magnitude > max_magnitude[b]:
+                    max_magnitude[b] = magnitude
+                sum_magnitude[b] += magnitude
             self._frame_count += 1
 
         out.Clear()

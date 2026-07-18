@@ -47,7 +47,7 @@
 //
 // That specific order isn't arbitrary: detector, spectrogram, and jammer
 // are the three stages that read frame.iq() (the largest field by far,
-// 4096 samples/batch), so they're grouped first. Once jammer -- the last
+// 10,000 samples/batch), so they're grouped first. Once jammer -- the last
 // of the three -- has read it, the microservice build clears frame.iq()
 // before forwarding, so the last two hops (jammer->stats,
 // stats->deinterleaver) never carry the raw samples at all. Each stage

@@ -33,20 +33,27 @@ class Deinterleaver:
     def process(
         self, batch: "pulse_pb2.PulseEventBatch", out: "pulse_pb2.DeinterleaveSummary"
     ) -> None:
+        sample_rate_hz = self._sample_rate_hz
+        pri_tolerance_seconds = self._pri_tolerance_seconds
+        tracks = self._tracks
+        next_track_id = self._next_track_id
+
         for event in batch.events:
-            pulse_time = event.start_sample / self._sample_rate_hz
+            start_sample = event.start_sample
+            peak_amplitude = event.peak_amplitude
+            pulse_time = start_sample / sample_rate_hz
 
             # Prefer the closest track whose predicted next-pulse time
             # falls within tolerance; fall back to a track that only has
             # one pulse so far (no PRI to test against yet) if no
             # established track matches.
             best_match = None
-            best_diff = self._pri_tolerance_seconds
+            best_diff = pri_tolerance_seconds
             seed_match = None
 
-            for track in self._tracks:
+            for track in tracks:
                 if track.pri_count > 0:
-                    last_time = track.last_start_sample / self._sample_rate_hz
+                    last_time = track.last_start_sample / sample_rate_hz
                     predicted = last_time + (track.pri_sum_seconds / track.pri_count)
                     diff = abs(predicted - pulse_time)
                     if diff <= best_diff:
@@ -57,20 +64,22 @@ class Deinterleaver:
 
             target = best_match if best_match is not None else seed_match
             if target is None:
-                target = _Track(self._next_track_id)
-                self._next_track_id += 1
-                self._tracks.append(target)
+                target = _Track(next_track_id)
+                next_track_id += 1
+                tracks.append(target)
 
             if target.pulse_count > 0:
-                last_time = target.last_start_sample / self._sample_rate_hz
+                last_time = target.last_start_sample / sample_rate_hz
                 target.pri_sum_seconds += pulse_time - last_time
                 target.pri_count += 1
-            target.last_start_sample = event.start_sample
-            target.peak_sum += event.peak_amplitude
+            target.last_start_sample = start_sample
+            target.peak_sum += peak_amplitude
             target.pulse_count += 1
 
+        self._next_track_id = next_track_id
+
         out.Clear()
-        for track in self._tracks:
+        for track in tracks:
             t = out.tracks.add()
             t.track_id = track.track_id
             t.pulse_count = track.pulse_count

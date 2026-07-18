@@ -7,6 +7,23 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# Cross-TU inlining across pulsecore's small, frequently-called Process()
+# methods and their callers (the plugins, monolith_main.cpp, each
+# microservice's main.cpp) buys a modest additional win on top of the
+# regular -O3 build with no source changes and no semantic risk -- LTO
+# only affects codegen within each already-existing final link target
+# (each .so, each executable), never linkage/registration behavior, so
+# it can't disturb the pulse_proto single-registration invariant below.
+# Only enabled when the toolchain actually supports it and only for
+# Release, so a debug build's compile times aren't affected.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
+  if(ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+  endif()
+endif()
+
 # Put every binary (executables and plugin .so's) in one directory so
 # monolith_app can find its plugins next to itself with no extra setup.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

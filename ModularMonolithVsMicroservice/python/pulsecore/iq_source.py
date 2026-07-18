@@ -23,6 +23,10 @@ _NOISE_AMPLITUDE = 0.5
 _UINT32_MAX = 0xFFFFFFFF
 _MASK32 = 0xFFFFFFFF
 _SQRT2 = math.sqrt(2.0)
+# I/Q split evenly across both components (see the in-pulse branch below);
+# precomputed once instead of dividing by _SQRT2 on every sample, since
+# there are only ever two possible values (this, or 0.0 in the gap).
+_PULSE_COMPONENT = _PULSE_AMPLITUDE / _SQRT2
 
 
 class SyntheticIQSource:
@@ -31,18 +35,6 @@ class SyntheticIQSource:
         self._total_samples = num_pulses * (_GAP_SAMPLES + _PULSE_SAMPLES) + _GAP_SAMPLES
         self._sample_cursor = 0
         self._rng_state = seed if seed != 0 else 1
-
-    def _next_noise(self) -> float:
-        # xorshift32, matching common/src/iq_source.cpp bit-for-bit -- each
-        # step explicitly masks to 32 bits since Python integers don't
-        # wrap on their own the way C++'s uint32_t does.
-        x = self._rng_state
-        x = (x ^ (x << 13)) & _MASK32
-        x = (x ^ (x >> 17)) & _MASK32
-        x = (x ^ (x << 5)) & _MASK32
-        self._rng_state = x
-        unit = x / _UINT32_MAX
-        return (unit - 0.5) * 2.0 * _NOISE_AMPLITUDE
 
     def next_batch(self, batch: "pulse_pb2.IQBatch") -> bool:
         """Fills `batch` (typically frame.iq) with the next chunk of
@@ -56,20 +48,51 @@ class SyntheticIQSource:
         batch.sample_rate_hz = self._sample_rate_hz
 
         period = _GAP_SAMPLES + _PULSE_SAMPLES
+        gap_samples = _GAP_SAMPLES
+        pulse_component = _PULSE_COMPONENT
+        noise_amplitude = _NOISE_AMPLITUDE
+        mask = _MASK32
+        uint32_max = _UINT32_MAX
         count = min(_BATCH_SIZE, self._total_samples - self._sample_cursor)
         cursor = self._sample_cursor
+        add_sample = batch.samples.add
+        rng = self._rng_state
+        # phase cycles through [0, period) in lockstep with the sample
+        # index; tracking it with an increment-and-wrap instead of
+        # `idx % period` every iteration avoids a division per sample.
+        phase = cursor % period
 
         for i in range(count):
-            idx = cursor + i
-            phase = idx % period
-            in_pulse = phase >= _GAP_SAMPLES
-            amplitude = _PULSE_AMPLITUDE if in_pulse else 0.0
-            component = amplitude / _SQRT2
+            component = pulse_component if phase >= gap_samples else 0.0
+            phase += 1
+            if phase == period:
+                phase = 0
 
-            s = batch.samples.add()
-            s.sample_index = idx
-            s.i = component + self._next_noise()
-            s.q = component + self._next_noise()
+            # Inlined xorshift32 (was a self._next_noise() method called
+            # twice per sample -- 20,000 bound-method calls per
+            # 10,000-sample batch just for RNG dispatch). A C++ compiler
+            # inlines the equivalent private-method calls automatically at
+            # -O3 (see iq_source.cpp); CPython never inlines method calls,
+            # so this does it by hand to get the same effect. Still
+            # matches common/src/iq_source.cpp bit-for-bit: each step
+            # explicitly masks to 32 bits since Python integers don't wrap
+            # on their own the way C++'s uint32_t does, and i's noise is
+            # drawn before q's, same order as the two original calls.
+            rng = (rng ^ (rng << 13)) & mask
+            rng = (rng ^ (rng >> 17)) & mask
+            rng = (rng ^ (rng << 5)) & mask
+            noise_i = ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude
+
+            rng = (rng ^ (rng << 13)) & mask
+            rng = (rng ^ (rng >> 17)) & mask
+            rng = (rng ^ (rng << 5)) & mask
+            noise_q = ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude
+
+            s = add_sample()
+            s.sample_index = cursor + i
+            s.i = component + noise_i
+            s.q = component + noise_q
 
         self._sample_cursor = cursor + count
+        self._rng_state = rng
         return True

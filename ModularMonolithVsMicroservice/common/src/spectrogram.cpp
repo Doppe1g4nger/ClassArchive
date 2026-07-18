@@ -28,8 +28,8 @@ void SpectrogramAnalyzer::Process(const pulse::IQBatch& batch, pulse::Spectrogra
       // Rotate a unit phasor by -omega per sample instead of calling
       // cos()/sin() for every one: seed it once at this batch's first
       // sample_index, then advance it with one fixed complex multiply
-      // per sample. At 4096 samples/bin/batch that's the difference
-      // between ~4 transcendental calls and ~8000 per batch -- with 8
+      // per sample. At 10,000 samples/bin/batch that's the difference
+      // between ~4 transcendental calls and ~20,000 per batch -- with 8
       // bins and hundreds of batches, calling cos()/sin() per sample
       // dominated the whole pipeline's runtime. Floating-point drift in
       // the rotator's magnitude over one batch (a few thousand

@@ -12,9 +12,9 @@ namespace pulsecore {
 // narrow rectangular pulses; it looks like elevated energy sustained
 // across most of a batch, which is what duty_cycle_threshold measures
 // against. The defaults are set well above this repo's synthetic pulse
-// train's normal duty cycle (~23%, since each 520-sample period is 120
-// samples of pulse) specifically so ordinary pulsed traffic doesn't get
-// misreported as jamming.
+// train's normal duty cycle (20%, since each 10-sample period is 2
+// samples of pulse -- see iq_source.h) specifically so ordinary pulsed
+// traffic doesn't get misreported as jamming.
 class JammerDetector {
  public:
   JammerDetector(double power_threshold, double duty_cycle_threshold);

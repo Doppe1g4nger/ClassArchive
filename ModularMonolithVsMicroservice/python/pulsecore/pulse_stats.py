@@ -18,19 +18,45 @@ class PulseStatsAccumulator:
         self._prev_start_sample = 0
 
     def add(self, batch: "pulse_pb2.PulseEventBatch") -> None:
-        for e in batch.events:
-            self._count += 1
-            self._peak_sum += e.peak_amplitude
-            self._duration_sum += e.duration_seconds
-            self._peak_min = min(self._peak_min, e.peak_amplitude)
-            self._peak_max = max(self._peak_max, e.peak_amplitude)
+        # Same reasoning as PulseDetector.process(): hoist the running
+        # state to locals for the loop, write back once at the end.
+        count = self._count
+        peak_sum = self._peak_sum
+        duration_sum = self._duration_sum
+        peak_min = self._peak_min
+        peak_max = self._peak_max
+        pri_sum = self._pri_sum
+        pri_count = self._pri_count
+        have_prev_start = self._have_prev_start
+        prev_start_sample = self._prev_start_sample
+        sample_rate_hz = self._sample_rate_hz
 
-            if self._have_prev_start:
-                gap_samples = e.start_sample - self._prev_start_sample
-                self._pri_sum += gap_samples / self._sample_rate_hz
-                self._pri_count += 1
-            self._prev_start_sample = e.start_sample
-            self._have_prev_start = True
+        for e in batch.events:
+            count += 1
+            peak_amplitude = e.peak_amplitude
+            peak_sum += peak_amplitude
+            duration_sum += e.duration_seconds
+            if peak_amplitude < peak_min:
+                peak_min = peak_amplitude
+            if peak_amplitude > peak_max:
+                peak_max = peak_amplitude
+
+            start_sample = e.start_sample
+            if have_prev_start:
+                pri_sum += (start_sample - prev_start_sample) / sample_rate_hz
+                pri_count += 1
+            prev_start_sample = start_sample
+            have_prev_start = True
+
+        self._count = count
+        self._peak_sum = peak_sum
+        self._duration_sum = duration_sum
+        self._peak_min = peak_min
+        self._peak_max = peak_max
+        self._pri_sum = pri_sum
+        self._pri_count = pri_count
+        self._have_prev_start = have_prev_start
+        self._prev_start_sample = prev_start_sample
 
     def finalize(self) -> "pulse_pb2.PulseSummary":
         summary = pulse_pb2.PulseSummary()
