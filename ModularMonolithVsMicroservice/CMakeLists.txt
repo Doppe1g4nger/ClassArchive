@@ -46,6 +46,9 @@ add_library(pulsecore STATIC
   common/src/pulse_detector.cpp
   common/src/pulse_stats.cpp
   common/src/iq_source.cpp
+  common/src/spectrogram.cpp
+  common/src/jammer.cpp
+  common/src/deinterleaver.cpp
 )
 set_target_properties(pulsecore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(pulsecore PUBLIC common/include)
@@ -62,6 +65,18 @@ add_library(pulse_stats_plugin SHARED monolith/plugins/pulse_stats_plugin.cpp)
 target_include_directories(pulse_stats_plugin PRIVATE monolith/include)
 target_link_libraries(pulse_stats_plugin PRIVATE pulsecore)
 
+add_library(pulse_spectrogram_plugin SHARED monolith/plugins/pulse_spectrogram_plugin.cpp)
+target_include_directories(pulse_spectrogram_plugin PRIVATE monolith/include)
+target_link_libraries(pulse_spectrogram_plugin PRIVATE pulsecore)
+
+add_library(pulse_jammer_plugin SHARED monolith/plugins/pulse_jammer_plugin.cpp)
+target_include_directories(pulse_jammer_plugin PRIVATE monolith/include)
+target_link_libraries(pulse_jammer_plugin PRIVATE pulsecore)
+
+add_library(pulse_deinterleaver_plugin SHARED monolith/plugins/pulse_deinterleaver_plugin.cpp)
+target_include_directories(pulse_deinterleaver_plugin PRIVATE monolith/include)
+target_link_libraries(pulse_deinterleaver_plugin PRIVATE pulsecore)
+
 add_executable(monolith_app monolith/host/monolith_main.cpp)
 target_include_directories(monolith_app PRIVATE monolith/include)
 target_link_libraries(monolith_app PRIVATE pulsecore ${CMAKE_DL_LIBS})
@@ -77,3 +92,12 @@ target_link_libraries(detector_service PRIVATE pulsecore netutil)
 
 add_executable(stats_service microservice/stats_service/main.cpp)
 target_link_libraries(stats_service PRIVATE pulsecore netutil)
+
+add_executable(spectrogram_service microservice/spectrogram_service/main.cpp)
+target_link_libraries(spectrogram_service PRIVATE pulsecore netutil)
+
+add_executable(jammer_service microservice/jammer_service/main.cpp)
+target_link_libraries(jammer_service PRIVATE pulsecore netutil)
+
+add_executable(deinterleave_service microservice/deinterleave_service/main.cpp)
+target_link_libraries(deinterleave_service PRIVATE pulsecore netutil)

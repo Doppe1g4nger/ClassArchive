@@ -29,34 +29,47 @@ done
 echo "done"
 echo
 
-echo "== microservices (detector_service + stats_service) =="
+echo "== microservices (detector_service + stats/spectrogram/jammer/deinterleave services) =="
 for i in $(seq 1 "$RUNS"); do
-  port=$((BASE_PORT + i))
-  # Timer starts before stats_service is even launched, so its process
+  # Each run gets its own block of 4 ports (base + i*10 + offset 0..3) so
+  # consecutive runs can't collide even if a prior run's sockets are
+  # still winding down.
+  base=$((BASE_PORT + i * 10))
+  # Timer starts before any service is even launched, so their process
   # startup and library load count toward the total -- the same way
   # monolith_app's single process-start-to-exit measurement above
   # includes its own startup cost. Timing only detector_service (as an
-  # earlier version of this script did) would unfairly hide half of the
+  # earlier version of this script did) would unfairly hide the
   # microservice architecture's process-startup overhead.
   start=$(date +%s.%N)
-  "$BIN/stats_service" "$port" >/dev/null 2>&1 &
-  spid=$!
-  # Wait for the listener to actually bind rather than guessing with a
-  # fixed sleep. Polls /proc/net/tcp for LISTEN state on the port instead
-  # of probing with a real connect() -- stats_service only accept()s once
+  "$BIN/stats_service" "$base" >/dev/null 2>&1 &
+  pid_stats=$!
+  "$BIN/spectrogram_service" "$((base + 1))" >/dev/null 2>&1 &
+  pid_spectrogram=$!
+  "$BIN/jammer_service" "$((base + 2))" >/dev/null 2>&1 &
+  pid_jammer=$!
+  "$BIN/deinterleave_service" "$((base + 3))" >/dev/null 2>&1 &
+  pid_deinterleave=$!
+
+  # Wait for every listener to actually bind rather than guessing with a
+  # fixed sleep. Polls /proc/net/tcp for LISTEN state on each port instead
+  # of probing with a real connect() -- each service only accept()s once
   # (backlog=1), so a throwaway probe connection could itself get
   # accepted and steal the slot detector_service needs. This wait is
   # itself counted as part of the microservice architecture's cost: it's
   # synchronization overhead the monolith never pays.
-  port_hex=$(printf '%04X' "$port")
-  for attempt in $(seq 1 100); do
-    if awk -v p=":${port_hex}" '$2 ~ p && $4=="0A" {found=1} END{exit !found}' /proc/net/tcp; then
-      break
-    fi
-    sleep 0.02
+  for offset in 0 1 2 3; do
+    port_hex=$(printf '%04X' "$((base + offset))")
+    for attempt in $(seq 1 100); do
+      if awk -v p=":${port_hex}" '$2 ~ p && $4=="0A" {found=1} END{exit !found}' /proc/net/tcp; then
+        break
+      fi
+      sleep 0.02
+    done
   done
-  "$BIN/detector_service" 127.0.0.1 "$port" "$NUM_PULSES" >/dev/null
-  wait "$spid"
+
+  "$BIN/detector_service" 127.0.0.1 "$base" "$NUM_PULSES" >/dev/null
+  wait "$pid_stats" "$pid_spectrogram" "$pid_jammer" "$pid_deinterleave"
   end=$(date +%s.%N)
   echo "$end - $start" | bc >> "$MICRO_TIMES"
 done

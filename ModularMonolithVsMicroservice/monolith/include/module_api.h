@@ -56,9 +56,28 @@ typedef void (*pulse_detector_process_fn)(pulse_module_t handle, const pulse::IQ
 typedef void (*pulse_stats_process_fn)(pulse_module_t handle, const pulse::PulseEventBatch& batch,
                                         pulse::PulseSummary* out);
 
+// Spectrogram modules: fold a batch of IQ samples into a running
+// magnitude spectrum and write the summary computed so far into *out.
+typedef void (*pulse_spectrogram_process_fn)(pulse_module_t handle, const pulse::IQBatch& batch,
+                                              pulse::SpectrogramSummary* out);
+
+// Jammer-detection modules: fold a batch of IQ samples into running
+// jam-detection state and write the summary computed so far into *out.
+typedef void (*pulse_jammer_process_fn)(pulse_module_t handle, const pulse::IQBatch& batch,
+                                         pulse::JamSummary* out);
+
+// Deinterleaver modules: fold a batch of pulse events into candidate
+// emitter tracks and write every track seen so far into *out.
+typedef void (*pulse_deinterleaver_process_fn)(pulse_module_t handle,
+                                                const pulse::PulseEventBatch& batch,
+                                                pulse::DeinterleaveSummary* out);
+
 }  // extern "C"
 
 #define PULSE_MODULE_CREATE_SYM "pulse_module_create"
 #define PULSE_MODULE_DESTROY_SYM "pulse_module_destroy"
 #define PULSE_DETECTOR_PROCESS_SYM "pulse_detector_process"
 #define PULSE_STATS_PROCESS_SYM "pulse_stats_process"
+#define PULSE_SPECTROGRAM_PROCESS_SYM "pulse_spectrogram_process"
+#define PULSE_JAMMER_PROCESS_SYM "pulse_jammer_process"
+#define PULSE_DEINTERLEAVER_PROCESS_SYM "pulse_deinterleaver_process"

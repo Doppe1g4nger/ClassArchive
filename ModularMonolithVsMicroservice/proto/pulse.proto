@@ -43,3 +43,33 @@ message PulseSummary {
   double min_peak_amplitude = 5;
   double max_peak_amplitude = 6;
 }
+
+// Running output of the spectrogram module: a small fixed set of
+// magnitude bins, updated as each IQBatch is folded in.
+message SpectrogramSummary {
+  double bin_hz = 1;              // frequency spacing between bins
+  repeated double max_magnitude = 2;
+  repeated double mean_magnitude = 3;
+  uint64 frame_count = 4;
+}
+
+// Running output of the jammer-detection module.
+message JamSummary {
+  uint64 batches_total = 1;
+  uint64 batches_flagged = 2;
+  double max_duty_cycle = 3;    // highest fraction of samples over the power threshold seen in one batch
+  double max_mean_power = 4;
+}
+
+// One candidate emitter track the deinterleaver has grouped pulses into.
+message EmitterTrack {
+  uint32 track_id = 1;
+  uint64 pulse_count = 2;
+  double estimated_pri_seconds = 3;
+  double mean_peak_amplitude = 4;
+}
+
+// Running output of the deinterleaver module: every track seen so far.
+message DeinterleaveSummary {
+  repeated EmitterTrack tracks = 1;
+}
