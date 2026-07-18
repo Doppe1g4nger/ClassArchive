@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
-# Times steady-state processing throughput for all four implementations --
-# C++ monolith, C++ microservices, Python monolith, Python microservices --
-# with process startup, dlopen()/import, and connection establishment
-# excluded from the measurement. Each program/chain self-reports its own
-# steady-state duration on a "STEADY_STATE_MS <value>" line (see
-# monolith_main.cpp / monolith_app.py, where the timer wraps only the
-# batch-processing loop, and
+# Times steady-state processing throughput for all eight implementations --
+# C++ monolith (scalar and AVX2), C++ microservices, Python monolith,
+# Python microservices, Python multiproc, Python numba, Python numpy --
+# with process startup, dlopen()/import, JIT warm-up, and connection
+# establishment excluded from the measurement. Each program/chain
+# self-reports its own steady-state duration on a "STEADY_STATE_MS
+# <value>" line (see monolith_main.cpp / monolith_app.py, where the timer
+# wraps only the batch-processing loop, and
 # microservice/deinterleave_service.{cpp,py}/detector_service.{cpp,py},
 # where it's the sink's first-receive-to-last-receive span); this script
 # launches each one N times, greps that self-reported number out of
 # stdout, and summarizes it the same way the old wall-clock benchmarks did.
+#
+# The three "Going further" variants (AVX2, numba, numpy -- see README.md)
+# are skipped with a warning rather than failing the whole benchmark when
+# their prerequisites are missing: avx_monolith_app when the toolchain
+# didn't support -mavx2 -mfma at configure time, the numba/numpy variants
+# when `pip install -r python/requirements-numeric.txt` hasn't been run.
+# The five core builds have no optional dependencies and always run.
 #
 # This supersedes scripts/benchmark.sh and scripts/benchmark_python.sh,
 # which timed each process from the outside (`date` before/after `exec`)
@@ -43,12 +51,26 @@ PY=python3
 PYDIR=python/microservice
 
 CPP_MONO_TIMES="$(mktemp)"
+CPP_AVX_TIMES="$(mktemp)"
 CPP_MICRO_TIMES="$(mktemp)"
 PY_MONO_TIMES="$(mktemp)"
 PY_MICRO_TIMES="$(mktemp)"
 PY_MULTI_TIMES="$(mktemp)"
+PY_NUMBA_TIMES="$(mktemp)"
+PY_NUMPY_TIMES="$(mktemp)"
 SINK_OUT="$(mktemp)"
-trap 'rm -f "$CPP_MONO_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$PY_MULTI_TIMES" "$SINK_OUT"' EXIT
+trap 'rm -f "$CPP_MONO_TIMES" "$CPP_AVX_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$PY_MULTI_TIMES" "$PY_NUMBA_TIMES" "$PY_NUMPY_TIMES" "$SINK_OUT"' EXIT
+
+# Availability probes for the optional variants -- see header comment.
+# The flags ride into the summary block below so it can tell "skipped by
+# design" (prerequisite missing) apart from "ran and produced no data"
+# (a real failure worth warning about).
+HAVE_AVX=0
+[ -x "./build/bin/avx_monolith_app" ] && HAVE_AVX=1
+HAVE_NUMBA=0
+python3 -c "import numba" >/dev/null 2>&1 && HAVE_NUMBA=1
+HAVE_NUMPY=0
+python3 -c "import numpy" >/dev/null 2>&1 && HAVE_NUMPY=1
 
 # Pulls the numeric value out of a "... STEADY_STATE_MS <value>" line from
 # stdin. Every program in this repo prints exactly one such line.
@@ -77,6 +99,17 @@ for i in $(seq 1 "$RUNS"); do
   "$BIN/monolith_app" "$BIN" "$NUM_PULSES" | extract_ms >> "$CPP_MONO_TIMES"
 done
 echo "done"
+echo
+
+echo "== C++ monolith (AVX2) =="
+if [ "$HAVE_AVX" = 1 ]; then
+  for i in $(seq 1 "$RUNS"); do
+    "$BIN/avx_monolith_app" "$NUM_PULSES" | extract_ms >> "$CPP_AVX_TIMES"
+  done
+  echo "done"
+else
+  echo "skipped (avx_monolith_app not built -- toolchain lacks -mavx2 -mfma)"
+fi
 echo
 
 echo "== C++ microservices (chain) =="
@@ -153,13 +186,34 @@ done
 echo "done"
 echo
 
-python3 - "$CPP_MONO_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$PY_MULTI_TIMES" "$RUNS" "$NUM_PULSES" <<'PYEOF'
+echo "== Python numba (JIT-compiled kernels) =="
+if [ "$HAVE_NUMBA" = 1 ]; then
+  for i in $(seq 1 "$RUNS"); do
+    "$PY" python/numba_variant/numba_monolith_app.py "$NUM_PULSES" | extract_ms >> "$PY_NUMBA_TIMES"
+  done
+  echo "done"
+else
+  echo "skipped (numba not installed -- pip install -r python/requirements-numeric.txt)"
+fi
+echo
+
+echo "== Python numpy (vectorized kernels) =="
+if [ "$HAVE_NUMPY" = 1 ]; then
+  for i in $(seq 1 "$RUNS"); do
+    "$PY" python/numpy_variant/numpy_monolith_app.py "$NUM_PULSES" | extract_ms >> "$PY_NUMPY_TIMES"
+  done
+  echo "done"
+else
+  echo "skipped (numpy not installed -- pip install -r python/requirements-numeric.txt)"
+fi
+echo
+
+python3 - "$CPP_MONO_TIMES" "$CPP_AVX_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$PY_MULTI_TIMES" "$PY_NUMBA_TIMES" "$PY_NUMPY_TIMES" "$RUNS" "$NUM_PULSES" "$HAVE_AVX" "$HAVE_NUMBA" "$HAVE_NUMPY" <<'PYEOF'
 import statistics
 import sys
 
-cpp_mono_path, cpp_micro_path, py_mono_path, py_micro_path, py_multi_path, runs, num_pulses = (
-    sys.argv[1:8]
-)
+(cpp_mono_path, cpp_avx_path, cpp_micro_path, py_mono_path, py_micro_path, py_multi_path,
+ py_numba_path, py_numpy_path, runs, num_pulses, have_avx, have_numba, have_numpy) = sys.argv[1:14]
 
 
 def load(path):
@@ -168,43 +222,51 @@ def load(path):
 
 
 cpp_mono = load(cpp_mono_path)
+cpp_avx = load(cpp_avx_path)
 cpp_micro = load(cpp_micro_path)
 py_mono = load(py_mono_path)
 py_micro = load(py_micro_path)
 py_multi = load(py_multi_path)
+py_numba = load(py_numba_path)
+py_numpy = load(py_numpy_path)
 
-for name, xs, expected in [
-    ("C++ monolith", cpp_mono, int(runs)),
-    ("C++ microservices", cpp_micro, int(runs)),
-    ("Python monolith", py_mono, int(runs)),
-    ("Python microservices", py_micro, int(runs)),
-    ("Python multiproc", py_multi, int(runs)),
-]:
-    if len(xs) != expected:
+# (name, samples, expected count, skip reason or None). A skipped optional
+# variant is reported as such, not warned about -- only a series that was
+# supposed to run and came up short gets the warning.
+series = [
+    ("C++ monolith", cpp_mono, int(runs), None),
+    ("C++ monolith (AVX2)", cpp_avx, int(runs),
+     None if have_avx == "1" else "not built (toolchain lacks -mavx2 -mfma)"),
+    ("C++ microservices", cpp_micro, int(runs), None),
+    ("Python monolith", py_mono, int(runs), None),
+    ("Python microservices", py_micro, int(runs), None),
+    ("Python multiproc", py_multi, int(runs), None),
+    ("Python numba", py_numba, int(runs),
+     None if have_numba == "1" else "numba not installed"),
+    ("Python numpy", py_numpy, int(runs),
+     None if have_numpy == "1" else "numpy not installed"),
+]
+
+for name, xs, expected, skip in series:
+    if skip is None and len(xs) != expected:
         print(
             f"warning: {name} produced {len(xs)} STEADY_STATE_MS readings, expected {expected} "
             "(a run likely failed -- check for stray output above)",
             file=sys.stderr,
         )
 
-
-def summarize(name, xs):
-    if not xs:
-        print(f"{name:>24}  no data")
-        return
-    print(
-        f"{name:>24}  min={min(xs):9.3f}ms  median={statistics.median(xs):9.3f}ms  "
-        f"mean={statistics.mean(xs):9.3f}ms  stdev={statistics.pstdev(xs):8.3f}ms  "
-        f"max={max(xs):9.3f}ms"
-    )
-
-
 print(f"Steady-state results over {runs} runs, {num_pulses} pulses/run:\n")
-summarize("C++ monolith", cpp_mono)
-summarize("C++ microservices", cpp_micro)
-summarize("Python monolith", py_mono)
-summarize("Python microservices", py_micro)
-summarize("Python multiproc", py_multi)
+for name, xs, expected, skip in series:
+    if skip is not None:
+        print(f"{name:>24}  skipped: {skip}")
+    elif not xs:
+        print(f"{name:>24}  no data")
+    else:
+        print(
+            f"{name:>24}  min={min(xs):9.3f}ms  median={statistics.median(xs):9.3f}ms  "
+            f"mean={statistics.mean(xs):9.3f}ms  stdev={statistics.pstdev(xs):8.3f}ms  "
+            f"max={max(xs):9.3f}ms"
+        )
 
 if cpp_mono and cpp_micro and py_mono and py_micro and py_multi:
     print()
@@ -217,4 +279,12 @@ if cpp_mono and cpp_micro and py_mono and py_micro and py_multi:
     print(f"Python microservices is {sp / mp:.2f}x the Python monolith mean")
     print(f"Python multiproc is {pm / mp:.2f}x the Python monolith mean")
     print(f"Python multiproc is {pm / sp:.2f}x the Python microservices mean")
+    if cpp_avx:
+        print(f"C++ AVX2 monolith is {statistics.mean(cpp_avx) / mc:.2f}x the C++ (scalar) monolith mean")
+    if py_numba:
+        print(f"Python numba is {statistics.mean(py_numba) / mp:.3f}x the Python monolith mean "
+              f"({mp / statistics.mean(py_numba):.1f}x faster)")
+    if py_numpy:
+        print(f"Python numpy is {statistics.mean(py_numpy) / mp:.2f}x the Python monolith mean "
+              f"({mp / statistics.mean(py_numpy):.2f}x faster)")
 PYEOF

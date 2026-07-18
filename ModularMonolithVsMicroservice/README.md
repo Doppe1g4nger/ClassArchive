@@ -170,7 +170,9 @@ scripts/run_python_multiproc.sh      Run the Python forked-worker build
 scripts/run_python_numba.sh          Run the numba-JIT variant
 scripts/run_python_numpy.sh          Run the numpy-vectorized variant
 scripts/benchmark_python.sh          Time N runs of all four, wall clock (includes startup)
-scripts/benchmark_steady_state.sh    Time N runs of all five, steady-state only (startup excluded)
+scripts/benchmark_steady_state.sh    Time N runs of all eight, steady-state only (startup excluded;
+                                       AVX2/numba/numpy series skip gracefully if their
+                                       prerequisites are missing)
 ```
 
 ## Building
@@ -1276,6 +1278,185 @@ what happens *after* the extraction). **AVX2's ~1.00x** is the most
 surprising result of the three only if you expect vectorization to
 always help; once the actual bottleneck (pointer-chasing, not
 arithmetic) is identified, it's the expected one.
+
+### The full eight-way picture
+
+`scripts/benchmark_steady_state.sh` now runs all eight builds in one
+pass (the AVX2/numba/numpy series skip gracefully, with a labeled
+"skipped" row instead of a failure, when their prerequisites are
+missing). One representative full run:
+
+```
+Steady-state results over 20 runs, 50000 pulses/run:
+
+            C++ monolith  min=   21.720ms  median=   22.297ms  mean=   22.778ms  stdev=   1.367ms  max=   27.775ms
+     C++ monolith (AVX2)  min=   21.470ms  median=   21.915ms  mean=   22.076ms  stdev=   0.722ms  max=   24.701ms
+       C++ microservices  min=   59.305ms  median=   63.095ms  mean=   67.609ms  stdev=   9.976ms  max=   96.403ms
+         Python monolith  min= 1586.407ms  median= 1646.678ms  mean= 1657.574ms  stdev=  66.499ms  max= 1797.578ms
+    Python microservices  min=  790.142ms  median=  827.823ms  mean=  851.087ms  stdev=  69.912ms  max= 1108.340ms
+        Python multiproc  min=  829.218ms  median=  898.560ms  mean=  932.161ms  stdev= 123.663ms  max= 1283.851ms
+            Python numba  min=  130.521ms  median=  143.063ms  mean=  158.668ms  stdev=  41.993ms  max=  310.130ms
+            Python numpy  min= 1176.174ms  median= 1209.414ms  mean= 1219.363ms  stdev=  35.160ms  max= 1284.947ms
+
+Python monolith is 72.8x the C++ monolith mean
+Python microservices is 12.6x the C++ microservices mean
+C++ microservices is 2.97x the C++ monolith mean
+Python microservices is 0.51x the Python monolith mean
+Python multiproc is 0.56x the Python monolith mean
+Python multiproc is 1.10x the Python microservices mean
+C++ AVX2 monolith is 0.97x the C++ (scalar) monolith mean
+Python numba is 0.096x the Python monolith mean (10.4x faster)
+Python numpy is 0.74x the Python monolith mean (1.36x faster)
+```
+
+(numba's mean is inflated by one 310ms outlier -- its median, 143ms, is
+the more representative number, consistent with the dedicated-run table
+above. numba remains the fastest Python build by a wide margin -- faster
+than both multi-process architectures, since it removes interpreter
+overhead outright rather than trading it for multi-core parallelism.)
+
+## Profiling: where the time actually goes
+
+Everything above reports *how long* each build takes; this section is
+about *why*, measured with cachegrind and callgrind (valgrind 3.22) for
+the C++ builds and cProfile for the Python ones -- the same evidence
+base behind several claims made earlier in this document, collected in
+one place. All numbers below are from 50,000-pulse runs on the same
+machine as the benchmarks above.
+
+### C++: cachegrind proves the memory-bound claim
+
+"An AVX regression, caught and fixed" above argues this workload is
+bound by protobuf's pointer-chasing, not arithmetic. Cache simulation
+confirms it quantitatively:
+
+```
+                          scalar monolith      AVX2 monolith
+    instructions (Ir)     167.5M               166.1M
+    D1 (L1d) misses       7.087M               7.087M
+    D1 miss rate          21.5%                20.9%
+    LL (last-level) miss  0.1%                 0.1%
+```
+
+A 21% L1-data miss rate is enormous for a numeric kernel (well-blocked
+numeric code typically sits under 5%), and the AVX2 build changes
+neither the instruction count nor the miss count in any meaningful way
+-- the two builds are the same program as far as the memory system is
+concerned, which is why they benchmark identically. The near-zero
+last-level miss rate says the working set (one 10,000-sample batch of
+heap-allocated `IQSample` messages) fits in L2/L3 -- so this isn't a
+DRAM problem, it's pure L1-scale pointer-chasing: `RepeatedPtrField`
+scatters 10,000 little messages across the heap, and every read of a
+sample's `i`/`q` starts with a pointer dereference the prefetcher can't
+fully hide.
+
+Attributing the misses per function (`cg_annotate --sort=D1mr`) makes
+the picture sharper still: **75.7% of all D1 read-misses land inside
+`SpectrogramAnalyzer::Process`** -- it walks all 10,000 samples once per
+bin, 8 bins per batch, so it pays the pointer-chase 8x per batch where
+the detector and jammer (about 9.5% of misses each) pay it once. Which
+also explains, in one number, why AVX-porting the detector and jammer
+was never going to move the total: the two ported stages own less than
+a fifth of the misses between them, and the miss-heaviest stage (the
+spectrogram) is exactly the one with no portable vectorized
+`cos()`/`sin()` to build on.
+
+Per-function instruction counts (callgrind) for the scalar monolith,
+for reference: spectrogram 59.7%, IQ generation 18.7% (inlined into
+`main` by LTO), detector 5.4%, jammer 3.1%, deinterleaver 1.9%, protobuf
+`Clear()`/malloc machinery ~5%.
+
+### C++: the microservice chain executes 7.7x the instructions for the same work
+
+Running each of the five services under callgrind during one chain run
+and summing:
+
+```
+    detector_service       151M Ir   (~40M generation/detection, the rest serialize)
+    spectrogram_service    601M Ir   (~100M spectrogram -- same as the monolith's -- the rest parse/serialize/malloc)
+    jammer_service         436M Ir   (~5M jammer work; >98% parse/serialize/malloc)
+    stats_service           57M Ir
+    deinterleave_service    47M Ir
+    ------------------------------
+    chain total          1,292M Ir   vs. the monolith's 167M for identical output
+```
+
+The excess is almost entirely boundary cost, itemized: `IQSample::
+_InternalParse` / `_InternalSerialize` / `ByteSizeLong`, `WireFormatLite
+::InternalWriteMessage`, and -- the single biggest line item in the two
+iq-carrying middle services -- `_int_malloc`/`_int_free`/
+`malloc_consolidate`, because parsing a frame re-materializes 10,000
+heap-allocated `IQSample` objects *per hop* and tears them down again
+after forwarding. This is the instruction-level anatomy of the ~3x
+steady-state gap the benchmarks show, and of the wire-format asymmetry
+"The point of the example" describes: the monolith passes one frame by
+reference; every microservice hop rebuilds and destroys it.
+
+### Python: cProfile across the builds
+
+**Monolith** (2.85s under profiler): spectrogram `process()` 1.45s
+cumulative (51%), IQ generation 0.81s (28%), detector 0.26s, jammer
+0.19s -- the same shape as the C++ monolith's callgrind profile, shifted
+up two orders of magnitude. The single biggest non-stage line item is
+550,059 calls to protobuf's `RepeatedCompositeContainer.add` (one per
+generated sample plus one per detected event).
+
+**Microservice chain**, each service profiled during one run --
+this is the pipelined-bottleneck structure measured directly:
+
+```
+    detector_service       1.12s working  (0.78s generation, 0.25s detection)
+    spectrogram_service    1.41s working  (the bottleneck stage)
+    jammer_service         0.20s working, 1.41s blocked in socket recv
+    stats_service          0.03s working, 1.71s blocked in socket recv
+    deinterleave_service   0.07s working, 1.80s blocked in socket recv
+```
+
+Downstream stages spend nearly their whole lives waiting on the
+spectrogram stage -- the sink's steady-state number *is* the
+spectrogram stage's throughput, which is exactly what "Two different
+things are being measured" above predicted the sink metric would
+degenerate to once one stage dominates.
+
+**numpy variant** (2.08s under profiler): the vectorized kernels
+themselves have nearly vanished from the profile -- what remains is IQ
+generation (0.76s, still the interpreted sequential RNG) plus the
+protobuf-to-array conversion (`np.fromiter` over three per-sample
+generator expressions, ~0.55s cumulative). In other words, the
+"conversion tax" described in "Going further" isn't a footnote, it *is*
+this variant's profile: vectorizing the compute exposed
+generation+extraction as the new dominant cost, the same
+un-masking dynamic the multiproc/pickle finding showed at the
+architecture level.
+
+**numba variant** (0.86s total under profiler, including cache-load
+warm-up excluded from the steady-state timer): the jitted kernels are
+so cheap that the biggest remaining *steady-state* items are the two
+deliberately un-jitted pure-Python stages -- the deinterleaver (59ms)
+and stats accumulator (26ms) -- plus rebuilding `PulseEvent` protobuf
+messages from the kernel's output arrays. The next optimization target
+in this build wouldn't be a hot loop at all; it would be those
+seams.
+
+**multiproc's pickle overhead, isolated.** cProfile doesn't follow
+`fork()`ed children, so the multiproc workers were characterized by
+their computational identity to the microservice stages (same
+`pulsecore` code) plus a targeted microbenchmark of the one thing that
+differs -- the transport. Sending this repo's actual payload sizes 500
+times through a `multiprocessing.Pipe` (which pickles every payload)
+versus a raw framed TCP socket:
+
+```
+    265KB payload (the two iq-bearing hops):  pipe 304.6us/msg  socket 60.5us/msg   5.0x
+     35KB payload (the two stripped hops):    pipe  16.3us/msg  socket 11.4us/msg   1.4x
+```
+
+`Connection.send()` pays a 5x per-message penalty on the big frames --
+roughly 25ms per 50-batch run summed over the iq-bearing hops, the
+right order of magnitude for the 1.08-1.10x multiproc-vs-microservices
+gap the benchmarks show (and small enough to hide inside both builds'
+run-to-run noise, which is why the two traded places before and after
+the hyperoptimization pass).
 
 ## Correctness
 
