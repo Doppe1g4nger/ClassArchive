@@ -7,9 +7,16 @@ ops, no reduction reordering, so kernels.py's output is bit-identical to
 pulsecore's pure-Python output. See kernels.py's module docstring for
 why that's specifically a numba property, not shared by numpy_variant/.
 
-Only the three stages that touch the full 10,000-sample IQ batch
-(detector, spectrogram, jammer) and IQ generation are JIT-compiled here.
-pulse_stats and the deinterleaver operate on the much smaller `events`
-list (roughly 1,000/batch, not 10,000) and are reused from pulsecore
-as-is -- they were never the bottleneck this pass is targeting.
+All six pieces of per-batch work are JIT-compiled: IQ generation, the
+three stages that touch the full 10,000-sample batch (detector,
+spectrogram, jammer), and -- as of a second pass -- the stats
+accumulator and deinterleaver too. Those last two operate on the much
+smaller `events` stream (roughly 1,000/batch) and were originally
+reused from pulsecore as pure Python on the theory that they'd never
+matter; cProfile then showed that with everything else compiled, they
+(plus rebuilding protobuf event messages just to feed them) had become
+essentially *all* of this build's remaining steady-state time. Jitting
+them removed that seam and the protobuf rebuild with it -- see
+kernels.py's stats_accumulate/deinterleave_events. Output remains
+byte-identical to every other build.
 """

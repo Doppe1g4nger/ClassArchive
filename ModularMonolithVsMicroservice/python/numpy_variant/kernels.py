@@ -29,20 +29,21 @@ verify_numpy_variant.py), not just asserted:
    call: the optimization that helps the scalar/numba versions would
    actively hurt this one.
 
-Like numba_variant/kernels.py, IQ generation is not vectorized here: the
-xorshift32 RNG is a genuinely sequential recurrence (each state depends
-on the previous one), which doesn't rewrite into bulk array ops without
-a materially more advanced technique (e.g. jump-ahead via the RNG's
-underlying linear-recurrence structure) that's out of proportion for
-what this variant is demonstrating. numpy_monolith_app.py generates each
-batch with the existing pulsecore.iq_source.SyntheticIQSource (into a
-real pulse_pb2.IQBatch) and converts it once via
-pulsecore.array_view.extract_iq -- a real cost numba_variant's
-monolith app doesn't pay, since numba can JIT-compile that same
-sequential generator loop directly with no rewrite required. That
-asymmetry -- numba shrugs off a sequential bottleneck, numpy can't
-without extra work -- is one of the more interesting differences between
-the two approaches, not an oversight in this one.
+The noise generator's xorshift32 RNG is a genuinely sequential
+recurrence (each state depends on the previous one), which doesn't
+rewrite into bulk array ops without a materially more advanced
+technique (e.g. jump-ahead via the RNG's underlying linear-recurrence
+structure) that's out of proportion for what this variant is
+demonstrating -- numba can JIT-compile that same sequential loop
+directly with no rewrite required, an asymmetry between the two
+approaches worth noticing. This variant originally routed generation
+through pulse_pb2.IQBatch (pulsecore's generator) and converted with
+array_view.extract_iq; cProfile then measured that round-trip as the
+variant's single biggest cost, bigger than every vectorized kernel
+combined, so generation now writes straight into numpy arrays with only
+the RNG recurrence left in a Python loop -- see iq_source_arrays.py for
+what's vectorized there, what isn't, and why the output is still
+bit-identical to pulsecore's generator.
 """
 import numpy as np
 

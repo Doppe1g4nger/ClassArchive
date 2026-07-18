@@ -19,11 +19,10 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from pulsecore import pulse_pb2
-from pulsecore.iq_source import SyntheticIQSource
-from pulsecore.array_view import extract_iq
 from pulsecore.pulse_stats import PulseStatsAccumulator
 from pulsecore.deinterleaver import Deinterleaver
 from numpy_variant import kernels
+from numpy_variant.iq_source_arrays import SyntheticIQSourceArrays
 
 _SAMPLE_RATE_HZ = 10_000_000.0
 _NUM_BINS = 8
@@ -39,12 +38,15 @@ def main() -> int:
     threshold_sq = _THRESHOLD * _THRESHOLD
     bin_hz = _SAMPLE_RATE_HZ / (2.0 * _NUM_BINS)
 
-    source = SyntheticIQSource(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
+    # Generates straight into numpy arrays -- cProfile showed the old
+    # protobuf-then-extract path (SyntheticIQSource + array_view) was
+    # this variant's single biggest cost, bigger than all its vectorized
+    # kernels combined. See iq_source_arrays.py.
+    source = SyntheticIQSourceArrays(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
     accumulator = PulseStatsAccumulator(sample_rate_hz=_SAMPLE_RATE_HZ)
     deinterleaver = Deinterleaver(
         sample_rate_hz=_SAMPLE_RATE_HZ, pri_tolerance_seconds=_PRI_TOLERANCE_SECONDS
     )
-    iq_batch = pulse_pb2.IQBatch()
     events_batch = pulse_pb2.PulseEventBatch()
     deinterleave_summary = pulse_pb2.DeinterleaveSummary()
 
@@ -67,12 +69,11 @@ def main() -> int:
     # Timed region covers only the batch-processing loop, same convention
     # as every other build in this repo.
     steady_state_start = time.perf_counter()
-    while source.next_batch(iq_batch):
-        # One conversion from pulse_pb2.IQBatch to numpy arrays, shared by
-        # all three kernels below -- see pulsecore/array_view.py and
-        # kernels.py's module docstring for why generation itself still
-        # goes through protobuf here (unlike numba_variant).
-        i_arr, q_arr, idx_arr = extract_iq(iq_batch)
+    while True:
+        got = source.next_batch()
+        if got is None:
+            break
+        i_arr, q_arr, idx_arr = got
         n = i_arr.shape[0]
 
         (ev_start, ev_end, ev_peak, ev_mean, ev_dur, in_pulse, pulse_start, pulse_peak,

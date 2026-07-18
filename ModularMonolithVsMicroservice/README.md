@@ -1315,6 +1315,10 @@ above. numba remains the fastest Python build by a wide margin -- faster
 than both multi-process architectures, since it removes interpreter
 overhead outright rather than trading it for multi-core parallelism.)
 
+This run is also the "before" baseline for the second, profile-driven
+optimization pass below ("Profile-driven optimization, round 2") --
+the numbers in *its* table supersede these.
+
 ## Profiling: where the time actually goes
 
 Everything above reports *how long* each build takes; this section is
@@ -1458,6 +1462,180 @@ gap the benchmarks show (and small enough to hide inside both builds'
 run-to-run noise, which is why the two traded places before and after
 the hyperoptimization pass).
 
+## Profile-driven optimization, round 2
+
+The profiling section above isn't just an explanation of the benchmark
+numbers -- read as a to-do list, each finding names the next thing worth
+attacking. This pass executed five candidates from it. Four survived;
+one was measured, found to be a regression, and reverted -- documented
+below with the same prominence as the wins, because *why* it lost is the
+most instructive result in the pass. Every surviving change was
+verified the usual way: all eight builds still byte-identical on every
+numeric field at 1,000 and 50,000 pulses after each change and again
+after a final clean rebuild, and both dedicated verification tools
+(`scripts/verify_avx_variant.sh`,
+`python/numpy_variant/verify_numpy_variant.py`) still PASS.
+
+### The big one: protobuf's Clear() was deleting the chain's world every batch
+
+Callgrind attributed ~45% of the iq-carrying C++ services' instructions
+to `DestroyProtos` + `CreateMaybeMessage<IQSample>` + malloc/free --
+destruction and re-creation of all 10,000 parsed `IQSample` objects,
+every batch, in every consuming service. The root cause is visible in
+the generated `pulse.pb.cc`: for a message *not* allocated on a
+protobuf arena, the generated `PipelineFrame::Clear()` doesn't clear
+singular submessage fields in place -- it **deletes them outright**
+(`if (GetArenaForAllocation() == nullptr && _impl_.iq_ != nullptr)
+delete _impl_.iq_;`). And `ParseFromString()` is Clear-then-merge, so
+the "reuse one frame object across the loop" optimization from the
+first pass never actually reused any submessage storage on the parse
+side -- the frame object survived, its entire contents were rebuilt
+from the heap up every batch.
+
+The fix exploits the one protobuf container that *does* cache:
+`RepeatedPtrField::Clear()` zeroes its elements and keeps them
+allocated for the next `Add()`. So each consuming service now clears
+the two big repeated-field carriers in place and parses with merge
+semantics on top:
+
+```cpp
+if (frame.has_iq()) frame.mutable_iq()->Clear();
+if (frame.has_events()) frame.mutable_events()->Clear();
+if (!frame.MergeFromString(payload)) { ... }
+```
+
+Merging into a cleared element is value-identical to parsing into a
+fresh one (Clear() zeroes every field; proto3 merge overwrites scalars
+and appends to now-empty repeated fields), verified by output diff.
+Effect, comparing ratios within a single benchmark run (which cancels
+out machine drift -- see the caveat under the results table below):
+**the C++ chain went from 2.97x the monolith to 1.97x**, its wall-clock
+mean roughly halving. This one fix recovered more of the chain's
+architectural overhead than everything in the first optimization pass
+combined -- and it was invisible until callgrind said where the
+instructions were going.
+
+### The instructive failure: the C++ flat-array spectrogram, measured and reverted
+
+Cachegrind's headline number -- 75.7% of the monolith's L1d read-misses
+inside `SpectrogramAnalyzer::Process`, from re-walking 10,000
+heap-scattered messages once per bin -- made the same fix Python's
+spectrogram already had look mandatory in C++: extract i/q to flat
+vectors once, then run the 8 bin passes over dense doubles. It was
+implemented, verified bit-identical, and A/B measured:
+
+```
+    without flat extraction:  22.28ms mean   (15 runs)
+    with flat extraction:     23.07ms mean   (15 runs)
+```
+
+A consistent ~3% *regression*, so it was reverted; pulsecore's scalar
+spectrogram is unchanged. The explanation is already in the cachegrind
+data, one line below the headline: the LL (last-level) miss rate is
+~0%, meaning every one of those L1 misses hits in L2 -- a ~12-cycle
+penalty that out-of-order execution overlaps almost entirely with the
+correlator's real arithmetic. The misses were *counted*, but they were
+never *stalling* anything, and the extraction pass added genuine new
+work (20,000 stores plus 160KB of traffic per batch) to fix a
+non-problem. **Cachegrind counts misses, not stalls** -- the same
+lesson as the AVX pass, one level deeper: before optimizing a
+memory-system number, check whether the memory system is actually the
+thing holding the retirement rate back. (The identical fix pays hugely
+in Python -- see below -- because CPython's cost is interpreter
+dispatch per access, not latency per access.)
+
+### Python: the spectrogram inner loop is complex multiplication -- so let complex do it
+
+cProfile put the spectrogram at 51% of the Python monolith's runtime.
+Its inner loop -- four multiplies and two adds to correlate, four
+multiplies and two adds to rotate -- is exactly two complex
+multiplications, and CPython evaluates a `complex * complex` in C using
+the same component formulas, same operations, same order (verified
+bit-identical over 100,000 random cases before adopting, and the
+magnitude deliberately stays `sqrt(re*re + im*im)` rather than
+`abs()`, which goes through `hypot()` and rounds differently). Samples
+are read out of protobuf once per batch into a `complex` list, and the
+inner loop becomes `acc += s * rot; rot *= step` -- roughly half the
+interpreted bytecode per sample. Together with a smaller fix in the
+generator (one `add(**kwargs)` call per sample instead of `add()` plus
+three attribute assignments -- 30,000 fewer interpreted operations per
+batch), the Python monolith went from 1619ms to 1336ms back-to-back
+(~1.2x), and every Python build sharing `pulsecore/` (microservices,
+multiproc) inherits both fixes.
+
+### numpy: stop generating through protobuf
+
+The profiling section measured this variant's generation-plus-extraction
+path as bigger than all its vectorized kernels combined. The fix is the
+same design numba_variant already used: generate straight into numpy
+arrays (`numpy_variant/iq_source_arrays.py`) -- indices and the
+pulse/gap envelope fully vectorized, only the sequential xorshift
+recurrence left in a Python loop, and nothing routed through
+`pulse_pb2.IQBatch` at all. Bit-identity with the protobuf generator is
+enforced by a new check in `verify_numpy_variant.py`, not assumed.
+Back-to-back: 1219ms to 693ms (~1.76x); the variant now runs at half
+the Python monolith's time instead of three-quarters.
+
+### numba: the seams were the bottleneck, so the seams got compiled
+
+The profiling section ended by noting the numba build's remaining
+steady-state time wasn't in any hot loop -- it was the two deliberately
+un-jitted pure-Python stages (deinterleaver, stats) plus rebuilding
+~1,000 `PulseEvent` protobuf messages per batch solely to feed them.
+This pass jitted both (`stats_accumulate`, `deinterleave_events` in
+`numba_variant/kernels.py` -- same event order, same operations, so
+byte-identical output) and deleted the protobuf rebuild, which nothing
+needed anymore. Back-to-back: 143ms median to 30ms (~4.3x). All six
+pieces of per-batch work are now compiled, and nothing in the hot path
+touches protobuf.
+
+### Results after round 2
+
+Same 8-way benchmark (`./scripts/benchmark_steady_state.sh 20 50000`):
+
+```
+Steady-state results over 20 runs, 50000 pulses/run:
+
+            C++ monolith  min=   17.418ms  median=   17.644ms  mean=   17.769ms  stdev=   0.382ms  max=   18.937ms
+     C++ monolith (AVX2)  min=   17.242ms  median=   17.635ms  mean=   17.705ms  stdev=   0.384ms  max=   18.707ms
+       C++ microservices  min=   32.203ms  median=   34.398ms  mean=   34.995ms  stdev=   1.909ms  max=   39.289ms
+         Python monolith  min= 1079.874ms  median= 1128.165ms  mean= 1125.021ms  stdev=  16.758ms  max= 1148.538ms
+    Python microservices  min=  641.209ms  median=  655.288ms  mean=  663.368ms  stdev=  18.620ms  max=  704.197ms
+        Python multiproc  min=  658.602ms  median=  695.283ms  mean=  696.056ms  stdev=  22.682ms  max=  739.024ms
+            Python numba  min=   29.411ms  median=   30.357ms  mean=   30.662ms  stdev=   1.442ms  max=   35.732ms
+            Python numpy  min=  542.651ms  median=  562.800ms  mean=  567.255ms  stdev=  14.196ms  max=  595.905ms
+
+Python monolith is 63.3x the C++ monolith mean
+Python microservices is 19.0x the C++ microservices mean
+C++ microservices is 1.97x the C++ monolith mean
+Python microservices is 0.59x the Python monolith mean
+Python multiproc is 0.62x the Python monolith mean
+Python multiproc is 1.05x the Python microservices mean
+C++ AVX2 monolith is 1.00x the C++ (scalar) monolith mean
+Python numba is 0.027x the Python monolith mean (36.7x faster)
+Python numpy is 0.50x the Python monolith mean (1.98x faster)
+```
+
+A caveat on cross-run comparisons: the C++ monolith -- whose code this
+pass didn't change -- has measured anywhere from ~18ms to ~23ms mean
+across different benchmark sessions on this machine, so *absolute*
+before/after deltas between runs carry that drift. The ratios within a
+single run don't, which is why the chain improvement is stated as
+2.97x-to-1.97x rather than as milliseconds; the back-to-back deltas
+quoted per-change above were measured minutes apart specifically to
+sidestep this.
+
+Two standout shifts in the final ordering: **Python-with-numba now
+beats the C++ microservice chain outright** (30.7ms vs 35.0ms mean) and
+sits within 1.7x of the C++ monolith itself -- "which language" turns
+out to matter far less than "how many times does the same batch get
+serialized, parsed, and re-heap-allocated." And the C++ chain's
+overhead over its monolith, the number this whole repo exists to
+examine, is now below 2x -- with the remaining gap being genuine
+serialize/parse/syscall work that a process boundary actually requires,
+rather than an accidental delete-and-rebuild the profiler had to
+catch.
+
 ## Correctness
 
 Every change in this repo's history was re-verified the same way: run the
@@ -1489,7 +1667,15 @@ detector held to the same exact byte-for-byte bar as the original five
 jammer held to a measured, documented floating-point tolerance instead,
 since exact equality isn't achievable for a vectorized reduction and
 claiming otherwise would be dishonest (see
-`python/numpy_variant/verify_numpy_variant.py`). Clearing a field a
+`python/numpy_variant/verify_numpy_variant.py`), and after the second,
+profile-driven optimization pass ("Profile-driven optimization,
+round 2" above): the C++ merge-parse change, the Python complex-
+arithmetic spectrogram, the numpy array-native generator, and the fully
+jitted numba build were each diffed at both scales as they landed, the
+reverted C++ flat-array spectrogram was verified bit-identical *before*
+being rejected on performance grounds (correct-but-slower is still
+reverted), and both verification tools pass against the final tree.
+Clearing a field a
 stage already consumed and copying its value into a local variable first
 (see `spectrogram_service`/`jammer_service`/`stats_service`'s
 `last_summary` pattern, in both languages) is exactly the kind of change

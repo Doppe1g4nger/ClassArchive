@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """numba_monolith_app.py: a fourth Python architecture. Runs the exact
-same five-algorithm pipeline as python/monolith/monolith_app.py, but
-with the three stages that touch the full 10,000-sample IQ batch
-(detector, spectrogram, jammer) -- plus IQ generation itself -- replaced
-by @njit-compiled kernels (see kernels.py) operating on flat numpy
-arrays instead of pulse_pb2 messages. pulse_stats and the deinterleaver
-are unchanged: they run over the much smaller `events` list, never the
-bottleneck this variant targets, so JIT-compiling them would add
-complexity for no measurable win.
+same five-algorithm pipeline as python/monolith/monolith_app.py, with
+every piece of per-batch work -- IQ generation, detector, spectrogram,
+jammer, stats, deinterleaver -- @njit-compiled (see kernels.py)
+operating on flat numpy arrays. The stats accumulator and deinterleaver
+started out as reused pure-Python pulsecore code on the theory that
+they'd never matter (they see ~1,000 events/batch, not 10,000 samples);
+profiling then showed that with everything else compiled they were
+essentially all of the remaining steady-state time, so a second pass
+jitted them too and dropped the protobuf event rebuild that existed
+only to feed them.
 
-Unlike monolith/stages.py's uniform Stage.process(frame) interface, this
-app generates each batch directly into numpy arrays (kernels.generate_batch)
-and passes those same arrays to all three kernels -- there's no
-pulse_pb2.IQBatch anywhere in the hot path, and no per-stage abstraction
-either, because both exist in the other builds to cross a boundary (a
-dlopen() call, a process, a wire) that a single-process vectorized build
-doesn't have. Only the detected events get written into a
-pulse_pb2.PulseEventBatch, since pulse_stats.py and deinterleaver.py are
-reused as-is. That's a deliberate departure from the "modular" story the
-other builds tell, not an oversight: this variant exists to answer a
-performance question (how fast can Python get once the hot loops are
-compiled), not to demonstrate a plugin architecture.
+Unlike monolith/stages.py's uniform Stage.process(frame) interface,
+nothing here touches pulse_pb2 in the hot path and there's no per-stage
+abstraction either -- both exist in the other builds to cross a
+boundary (a dlopen() call, a process, a wire) that a single-process
+compiled build doesn't have. That's a deliberate departure from the
+"modular" story the other builds tell, not an oversight: this variant
+exists to answer a performance question (how fast can Python get once
+the hot loops are compiled), not to demonstrate a plugin architecture.
 
     numba_monolith_app.py [num_pulses]
 """
@@ -32,7 +30,6 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from pulsecore import pulse_pb2
 from pulsecore.iq_source import (
     _BATCH_SIZE,
     _GAP_SAMPLES,
@@ -40,8 +37,6 @@ from pulsecore.iq_source import (
     _PULSE_COMPONENT,
     _NOISE_AMPLITUDE,
 )
-from pulsecore.pulse_stats import PulseStatsAccumulator
-from pulsecore.deinterleaver import Deinterleaver
 from numba_variant import kernels
 
 _SAMPLE_RATE_HZ = 10_000_000.0
@@ -67,6 +62,15 @@ def _warm_up():
     kernels.spectrogram_bins(i, q, 0, _SAMPLE_RATE_HZ, _NUM_BINS, 1.0,
                               np.zeros(_NUM_BINS), np.zeros(_NUM_BINS))
     kernels.jammer_power(i, q, _POWER_THRESHOLD)
+    ev = np.array([0, 10], dtype=np.uint64)
+    pk = np.array([1.0, 2.0])
+    du = np.array([1e-7, 1e-7])
+    kernels.stats_accumulate(ev, pk, du, _SAMPLE_RATE_HZ, 0, 0.0, 0.0,
+                              float("inf"), float("-inf"), 0.0, 0, False, np.uint64(0))
+    kernels.deinterleave_events(ev, pk, _SAMPLE_RATE_HZ, _PRI_TOLERANCE_SECONDS, 0, 1,
+                                 np.zeros(4, dtype=np.uint32), np.zeros(4, dtype=np.int64),
+                                 np.zeros(4, dtype=np.uint64), np.zeros(4),
+                                 np.zeros(4, dtype=np.int64), np.zeros(4))
 
 
 def main() -> int:
@@ -78,13 +82,6 @@ def main() -> int:
     total_samples = num_pulses * period + _GAP_SAMPLES
     bin_hz = _SAMPLE_RATE_HZ / (2.0 * _NUM_BINS)
     threshold_sq = _THRESHOLD * _THRESHOLD
-
-    accumulator = PulseStatsAccumulator(sample_rate_hz=_SAMPLE_RATE_HZ)
-    deinterleaver = Deinterleaver(
-        sample_rate_hz=_SAMPLE_RATE_HZ, pri_tolerance_seconds=_PRI_TOLERANCE_SECONDS
-    )
-    events_batch = pulse_pb2.PulseEventBatch()
-    deinterleave_summary = pulse_pb2.DeinterleaveSummary()
 
     rng_state = 42
     cursor = 0
@@ -104,6 +101,34 @@ def main() -> int:
     batches_flagged = 0
     max_duty_cycle = 0.0
     max_mean_power = 0.0
+
+    # Stats accumulator state, carried across batches -- same fields,
+    # same initial values as pulse_stats.PulseStatsAccumulator, now fed
+    # to the jitted stats_accumulate kernel (see kernels.py for why the
+    # last two stages got jitted in a second pass).
+    st_count = 0
+    st_peak_sum = 0.0
+    st_duration_sum = 0.0
+    st_peak_min = float("inf")
+    st_peak_max = float("-inf")
+    st_pri_sum = 0.0
+    st_pri_count = 0
+    st_have_prev = False
+    st_prev_start = np.uint64(0)
+
+    # Deinterleaver track state as parallel arrays for the jitted
+    # deinterleave_events kernel. Grown ahead of each call to the worst
+    # case (every event starts a new track) so the kernel never needs to
+    # reallocate.
+    track_capacity = 16
+    track_id = np.zeros(track_capacity, dtype=np.uint32)
+    track_pulse_count = np.zeros(track_capacity, dtype=np.int64)
+    track_last_start = np.zeros(track_capacity, dtype=np.uint64)
+    track_pri_sum = np.zeros(track_capacity)
+    track_pri_count = np.zeros(track_capacity, dtype=np.int64)
+    track_peak_sum = np.zeros(track_capacity)
+    track_count = 0
+    next_track_id = 1
 
     # Timed region covers only the batch-processing loop, same convention
     # as every other build in this repo -- JIT warm-up above and imports
@@ -139,30 +164,55 @@ def main() -> int:
         if mean_power > max_mean_power:
             max_mean_power = mean_power
 
-        # detect_pulses returns plain numpy arrays, not a pulse_pb2
-        # message -- stats/deinterleaver still speak protobuf, so the
-        # events this batch found are written into one exactly once
-        # here, the same event count as the scalar builds (~1,000/batch
-        # at this repo's scale), not the full 10,000-sample batch.
-        events_batch.Clear()
-        for k in range(len(ev_start)):
-            e = events_batch.events.add()
-            e.start_sample = int(ev_start[k])
-            e.end_sample = int(ev_end[k])
-            e.peak_amplitude = float(ev_peak[k])
-            e.mean_amplitude = float(ev_mean[k])
-            e.duration_seconds = float(ev_dur[k])
+        # Stats and deinterleaving consume the detector kernel's output
+        # arrays directly -- no protobuf anywhere in this loop. (An
+        # earlier version rebuilt a PulseEventBatch here purely to feed
+        # the pure-Python stats/deinterleaver; cProfile showed that
+        # rebuild plus those two interpreted stages were nearly all of
+        # this build's remaining steady-state time, so they became
+        # kernels too -- see kernels.py.)
+        (st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+         st_pri_sum, st_pri_count, st_have_prev, st_prev_start) = kernels.stats_accumulate(
+            ev_start, ev_peak, ev_dur, _SAMPLE_RATE_HZ,
+            st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+            st_pri_sum, st_pri_count, st_have_prev, st_prev_start,
+        )
 
-        accumulator.add(events_batch)
-        deinterleaver.process(events_batch, deinterleave_summary)
+        # Worst case, every event starts a new track -- grow the state
+        # arrays up front so the kernel never has to. (At this repo's
+        # single-emitter scale track_count stays 1, so this never fires
+        # after the first sizing; it's here so the kernel stays correct
+        # for arbitrary inputs, same as the pure-Python version was.)
+        needed = track_count + len(ev_start)
+        if needed > track_capacity:
+            while track_capacity < needed:
+                track_capacity *= 2
+
+            def grow(arr):
+                grown = np.zeros(track_capacity, dtype=arr.dtype)
+                grown[: arr.shape[0]] = arr
+                return grown
+
+            track_id = grow(track_id)
+            track_pulse_count = grow(track_pulse_count)
+            track_last_start = grow(track_last_start)
+            track_pri_sum = grow(track_pri_sum)
+            track_pri_count = grow(track_pri_count)
+            track_peak_sum = grow(track_peak_sum)
+        track_count, next_track_id = kernels.deinterleave_events(
+            ev_start, ev_peak, _SAMPLE_RATE_HZ, _PRI_TOLERANCE_SECONDS,
+            track_count, next_track_id,
+            track_id, track_pulse_count, track_last_start,
+            track_pri_sum, track_pri_count, track_peak_sum,
+        )
 
         cursor += count
         batches += 1
     steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
 
     print(
-        f"[numba_monolith_app.py] processed {batches} IQ batches through {4} numba-jitted "
-        f"kernels + 2 pure-Python stages"
+        f"[numba_monolith_app.py] processed {batches} IQ batches through 6 numba-jitted "
+        f"kernels"
     )
     print(f"[numba_monolith_app.py] STEADY_STATE_MS {steady_state_ms:.6f}")
 
@@ -183,21 +233,29 @@ def main() -> int:
         f"max_duty_cycle={max_duty_cycle:.3f} max_mean_power={max_mean_power:.2f}"
     )
 
-    stats = accumulator.finalize()
+    # Same derived fields, same expressions, as PulseStatsAccumulator
+    # .finalize() -- just computed from the kernel-carried state.
+    mean_peak = st_peak_sum / st_count if st_count > 0 else 0.0
+    mean_dur = st_duration_sum / st_count if st_count > 0 else 0.0
+    mean_pri = st_pri_sum / st_pri_count if st_pri_count > 0 else 0.0
+    min_peak = st_peak_min if st_count > 0 else 0.0
+    max_peak = st_peak_max if st_count > 0 else 0.0
     print(
-        f"[numba_monolith_app.py] stats: pulses={stats.pulse_count} "
-        f"mean_peak={stats.mean_peak_amplitude:.3f} "
-        f"mean_dur_us={stats.mean_duration_seconds * 1e6:.2f} "
-        f"mean_pri_us={stats.mean_pri_seconds * 1e6:.2f} "
-        f"min_peak={stats.min_peak_amplitude:.3f} max_peak={stats.max_peak_amplitude:.3f}"
+        f"[numba_monolith_app.py] stats: pulses={st_count} "
+        f"mean_peak={mean_peak:.3f} "
+        f"mean_dur_us={mean_dur * 1e6:.2f} "
+        f"mean_pri_us={mean_pri * 1e6:.2f} "
+        f"min_peak={min_peak:.3f} max_peak={max_peak:.3f}"
     )
 
-    print(f"[numba_monolith_app.py] deinterleaver: {len(deinterleave_summary.tracks)} track(s)")
-    for track in deinterleave_summary.tracks:
+    print(f"[numba_monolith_app.py] deinterleaver: {track_count} track(s)")
+    for t in range(track_count):
+        est_pri = track_pri_sum[t] / track_pri_count[t] if track_pri_count[t] > 0 else 0.0
+        mean_pk = track_peak_sum[t] / track_pulse_count[t] if track_pulse_count[t] > 0 else 0.0
         print(
-            f"[numba_monolith_app.py]   track {track.track_id}: pulses={track.pulse_count} "
-            f"estimated_pri_us={track.estimated_pri_seconds * 1e6:.2f} "
-            f"mean_peak={track.mean_peak_amplitude:.3f}"
+            f"[numba_monolith_app.py]   track {track_id[t]}: pulses={track_pulse_count[t]} "
+            f"estimated_pri_us={est_pri * 1e6:.2f} "
+            f"mean_peak={mean_pk:.3f}"
         )
 
     return 0

@@ -66,7 +66,12 @@ int main(int argc, char** argv) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
     }
-    if (!frame.ParseFromString(payload)) {
+    // In-place clear + merge-parse instead of ParseFromString() -- see
+    // spectrogram_service/main.cpp for why (reuses the parsed
+    // PulseEvent objects across batches instead of re-allocating them).
+    if (frame.has_iq()) frame.mutable_iq()->Clear();
+    if (frame.has_events()) frame.mutable_events()->Clear();
+    if (!frame.MergeFromString(payload)) {
       std::fprintf(stderr, "[deinterleave_service] dropping malformed frame\n");
       continue;
     }

@@ -31,6 +31,7 @@ from pulsecore.spectrogram import SpectrogramAnalyzer
 from pulsecore.jammer import JammerDetector
 from pulsecore.array_view import extract_iq
 from numpy_variant import kernels
+from numpy_variant.iq_source_arrays import SyntheticIQSourceArrays
 
 _SAMPLE_RATE_HZ = 10_000_000.0
 _NUM_BINS = 8
@@ -157,14 +158,46 @@ def check_against_real_signal(num_pulses: int) -> bool:
     return detector_exact and max_rel_err < 1e-9
 
 
+def check_array_generator(num_pulses: int) -> bool:
+    """iq_source_arrays.SyntheticIQSourceArrays must produce the exact
+    same sample stream as pulsecore's protobuf-based generator --
+    bit-for-bit, since it's the same xorshift sequence and the same
+    arithmetic per sample (see iq_source_arrays.py's docstring)."""
+    ref = SyntheticIQSource(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
+    arr = SyntheticIQSourceArrays(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
+    batch = pulse_pb2.IQBatch()
+    ok = True
+    batches = 0
+    while ref.next_batch(batch):
+        got = arr.next_batch()
+        if got is None:
+            ok = False
+            break
+        i_arr, q_arr, idx = got
+        ref_i, ref_q, ref_idx = extract_iq(batch)
+        if not (np.array_equal(ref_i, i_arr) and np.array_equal(ref_q, q_arr)
+                and np.array_equal(ref_idx, idx)):
+            ok = False
+            break
+        batches += 1
+    if arr.next_batch() is not None:
+        ok = False  # array generator produced more batches than the reference
+    print(f"array generator vs pulsecore generator ({batches} batches, exact match required): "
+          f"{'OK' if ok else 'MISMATCH'}")
+    return ok
+
+
 def main() -> int:
     num_pulses = int(sys.argv[1]) if len(sys.argv) > 1 else 50000
     ok_straddle = check_straddling()
     print()
+    ok_generator = check_array_generator(num_pulses)
+    print()
     ok_signal = check_against_real_signal(num_pulses)
     print()
-    print("PASS" if (ok_straddle and ok_signal) else "FAIL")
-    return 0 if (ok_straddle and ok_signal) else 1
+    ok = ok_straddle and ok_generator and ok_signal
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

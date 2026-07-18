@@ -88,10 +88,18 @@ class SyntheticIQSource:
             rng = (rng ^ (rng << 5)) & mask
             noise_q = ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude
 
-            s = add_sample()
-            s.sample_index = cursor + i
-            s.i = component + noise_i
-            s.q = component + noise_q
+            # One add() call with field kwargs instead of add() plus
+            # three attribute assignments -- upb constructs and fills
+            # the sample in a single C call, saving three descriptor
+            # lookups and three setattr dispatches per sample (30,000
+            # interpreted operations per batch; cProfile showed this
+            # loop's protobuf traffic among the monolith's top line
+            # items). Field values are identical either way.
+            add_sample(
+                sample_index=cursor + i,
+                i=component + noise_i,
+                q=component + noise_q,
+            )
 
         self._sample_cursor = cursor + count
         self._rng_state = rng

@@ -1,22 +1,19 @@
-"""Protobuf-to-numpy conversion helper, used only by numpy_variant/ --
-every other Python build in this repo (monolith, microservice,
-multiproc, numba_variant) never imports this module and has no numpy
-dependency at all. numba_variant doesn't need it because its IQ
-generator writes directly into numpy arrays (see
-numba_variant/kernels.py's generate_batch) instead of through
-pulse_pb2.IQBatch in the first place -- see numpy_variant/kernels.py's
-module docstring for why numpy_variant can't do the same thing and has
-to pay this conversion instead.
+"""Protobuf-to-numpy conversion helper. As of the second
+profile-driven optimization pass, only numpy_variant's *verification
+tool* (verify_numpy_variant.py) still uses this -- it needs to run the
+scalar pulsecore reference and the vectorized kernels over the exact
+same protobuf-generated batches to compare them. No benchmarked code
+path imports it anymore: numpy_monolith_app.py now generates straight
+into numpy arrays (see numpy_variant/iq_source_arrays.py) precisely
+because cProfile measured this conversion, plus the protobuf generation
+feeding it, as that variant's single biggest cost.
 
-Extracting a batch's `i`/`q`/`sample_index` fields into flat numpy
-arrays is not free: `IQBatch.samples` is a repeated *message* field, not
-a repeated scalar, so there is no bulk/zero-copy path in protobuf's
-Python API for it -- this still costs one Python-level attribute read
-per sample per array, the same class of cost the plain interpreted loop
-pays. It is done here exactly once per batch and the resulting arrays
-are reused across every stage that needs them (detector, spectrogram,
-jammer all read `i`/`q`; only the detector also needs `sample_index`),
-instead of every stage re-extracting its own copy.
+It's kept (rather than inlined into the verify script) as documentation
+of *why* that cost exists: `IQBatch.samples` is a repeated *message*
+field, not a repeated scalar, so there is no bulk/zero-copy path in
+protobuf's Python API for it -- extraction costs one Python-level
+attribute read per sample per array, the same class of cost the plain
+interpreted loop pays.
 """
 import numpy as np
 

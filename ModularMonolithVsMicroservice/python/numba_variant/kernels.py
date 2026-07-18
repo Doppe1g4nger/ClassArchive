@@ -14,15 +14,12 @@ means results are only equal to the scalar version within floating-point
 tolerance, not bit-identical. See numpy_variant/kernels.py's docstring
 for that side of the comparison.
 
-None of these functions know about pulse_pb2 at all. IQ generation
-(generate_batch below) writes directly into numpy arrays instead of a
-pulse_pb2.IQBatch -- there's no process/wire boundary in this
-single-process build to justify routing through protobuf just to
-immediately read the same values back out of it, so numba_monolith_app.py
-doesn't. Only the detected pulse events (a much smaller array -- roughly
-1,000/batch, not 10,000) get written into a pulse_pb2.PulseEventBatch,
-since pulse_stats.py and deinterleaver.py are reused as-is and expect
-that type.
+None of these functions know about pulse_pb2 at all -- and since the
+stats accumulator and deinterleaver became kernels too (see below),
+neither does any per-batch code in numba_monolith_app.py: there's no
+process/wire boundary in this single-process build to justify routing
+anything through protobuf, so nothing is. IQ samples flow from
+generate_batch's output arrays through every stage as arrays.
 """
 import numpy as np
 from numba import njit
@@ -179,3 +176,94 @@ def jammer_power(i_arr, q_arr, power_threshold):
         if power >= power_threshold:
             over_threshold += 1
     return power_sum, over_threshold
+
+
+# The two kernels below were added in a second pass, after cProfile
+# showed that with detector/spectrogram/jammer/generation jitted, the
+# numba build's remaining steady-state time was almost entirely the two
+# stages deliberately left as pure Python -- the deinterleaver and stats
+# accumulator -- plus rebuilding ~1,000 PulseEvent protobuf messages per
+# batch solely to feed them. Jitting these two (operating directly on
+# the detector kernel's output arrays) removes all three costs at once:
+# the protobuf event rebuild disappears entirely, since nothing in this
+# build needs pulse_pb2 for anything anymore.
+
+
+@njit(cache=True)
+def stats_accumulate(ev_start, ev_peak, ev_dur, sample_rate_hz,
+                      count, peak_sum, duration_sum, peak_min, peak_max,
+                      pri_sum, pri_count, have_prev, prev_start):
+    """JIT-compiled port of pulse_stats.py's add() loop -- same event
+    order, same operations, so the running state (and therefore the
+    final summary) is bit-identical to the pure-Python accumulator's."""
+    for k in range(ev_start.shape[0]):
+        count += 1
+        pa = ev_peak[k]
+        peak_sum += pa
+        duration_sum += ev_dur[k]
+        if pa < peak_min:
+            peak_min = pa
+        if pa > peak_max:
+            peak_max = pa
+
+        ss = ev_start[k]
+        if have_prev:
+            pri_sum += (ss - prev_start) / sample_rate_hz
+            pri_count += 1
+        prev_start = ss
+        have_prev = True
+
+    return count, peak_sum, duration_sum, peak_min, peak_max, pri_sum, pri_count, have_prev, prev_start
+
+
+@njit(cache=True)
+def deinterleave_events(ev_start, ev_peak, sample_rate_hz, pri_tolerance_seconds,
+                         track_count, next_track_id,
+                         track_id, track_pulse_count, track_last_start,
+                         track_pri_sum, track_pri_count, track_peak_sum):
+    """JIT-compiled port of deinterleaver.py's process() loop. Track
+    state lives in caller-owned parallel arrays instead of a list of
+    objects; the caller guarantees capacity for track_count plus one new
+    track per event (the worst case). Same per-event scan order, same
+    tie-breaking (closest track within tolerance wins, first single-pulse
+    track seeds otherwise), same arithmetic -- bit-identical tracks."""
+    for e in range(ev_start.shape[0]):
+        start_sample = ev_start[e]
+        pulse_time = start_sample / sample_rate_hz
+
+        best_match = -1
+        best_diff = pri_tolerance_seconds
+        seed_match = -1
+
+        for t in range(track_count):
+            if track_pri_count[t] > 0:
+                last_time = track_last_start[t] / sample_rate_hz
+                predicted = last_time + (track_pri_sum[t] / track_pri_count[t])
+                diff = abs(predicted - pulse_time)
+                if diff <= best_diff:
+                    best_diff = diff
+                    best_match = t
+            elif track_pulse_count[t] == 1 and seed_match == -1:
+                seed_match = t
+
+        target = best_match if best_match != -1 else seed_match
+        if target == -1:
+            target = track_count
+            track_id[target] = next_track_id
+            next_track_id += 1
+            track_pulse_count[target] = 0
+            track_last_start[target] = 0
+            track_pri_sum[target] = 0.0
+            track_pri_count[target] = 0
+            track_peak_sum[target] = 0.0
+            track_count += 1
+
+        if track_pulse_count[target] > 0:
+            last_time = track_last_start[target] / sample_rate_hz
+            track_pri_sum[target] += pulse_time - last_time
+            track_pri_count[target] += 1
+        track_last_start[target] = start_sample
+        track_peak_sum[target] += ev_peak[e]
+        track_pulse_count[target] += 1
+
+    return track_count, next_track_id

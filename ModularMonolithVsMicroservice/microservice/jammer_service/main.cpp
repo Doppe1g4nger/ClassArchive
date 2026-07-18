@@ -75,7 +75,15 @@ int main(int argc, char** argv) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
     }
-    if (!frame.ParseFromString(payload)) {
+    // In-place clear + merge-parse instead of ParseFromString(), so the
+    // 10,000 parsed IQSample objects get reused across batches instead
+    // of destroyed and re-allocated by the non-merge parse's implicit
+    // Clear() -- see spectrogram_service/main.cpp for the full story
+    // (callgrind attributed ~45% of this process's instructions to that
+    // churn).
+    if (frame.has_iq()) frame.mutable_iq()->Clear();
+    if (frame.has_events()) frame.mutable_events()->Clear();
+    if (!frame.MergeFromString(payload)) {
       std::fprintf(stderr, "[jammer_service] dropping malformed frame\n");
       continue;
     }
