@@ -165,3 +165,17 @@ target_link_libraries(jammer_service PRIVATE pulsecore netutil)
 
 add_executable(deinterleave_service microservice/deinterleave_service/main.cpp)
 target_link_libraries(deinterleave_service PRIVATE pulsecore netutil)
+
+# ---------------------------------------------------------------------------
+# Unit tests: one framework-free test binary (see tests/pulsecore_tests.cpp
+# for why no gtest), registered with ctest. The AVX2 parity tests compile
+# in only when the AVX2 variant itself was built.
+# ---------------------------------------------------------------------------
+enable_testing()
+add_executable(pulsecore_tests tests/pulsecore_tests.cpp)
+target_link_libraries(pulsecore_tests PRIVATE pulsecore netutil)
+if(TARGET pulsecore_avx)
+  target_compile_definitions(pulsecore_tests PRIVATE HAVE_AVX_VARIANT)
+  target_link_libraries(pulsecore_tests PRIVATE pulsecore_avx)
+endif()
+add_test(NAME pulsecore_tests COMMAND pulsecore_tests)

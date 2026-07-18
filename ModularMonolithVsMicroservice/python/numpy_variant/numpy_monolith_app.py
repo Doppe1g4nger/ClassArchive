@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """numpy_monolith_app.py: a fifth Python architecture. Same five-stage
 pipeline as python/monolith/monolith_app.py, with detector, spectrogram,
-and jammer rewritten as bulk numpy array operations (see kernels.py) --
-IQ generation, pulse_stats, and the deinterleaver are unchanged, reused
-directly from pulsecore. See kernels.py's module docstring for what's
-different about this variant's numbers versus every other build in this
-repo (they're numerically equivalent, not bit-identical) and why IQ
-generation specifically isn't vectorized here.
+and jammer rewritten as bulk numpy array operations (see kernels.py) and
+IQ generation writing straight into numpy arrays (see
+iq_source_arrays.py -- originally it reused pulsecore's protobuf-based
+generator, until profiling measured that round-trip as this variant's
+single biggest cost). pulse_stats and the deinterleaver are reused from
+pulsecore as-is; see __init__.py for why they've stayed pure Python
+here even after numba_variant jitted its own. See kernels.py's module
+docstring for what's different about this variant's numbers versus
+every other build in this repo (numerically equivalent, not
+bit-identical).
 
     numpy_monolith_app.py [num_pulses]
 """

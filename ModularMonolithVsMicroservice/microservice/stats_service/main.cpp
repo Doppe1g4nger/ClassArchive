@@ -86,8 +86,10 @@ int main(int argc, char** argv) {
     last_summary = frame.stats();
 
     // deinterleave_service (next hop) only reads frame.events(); nothing
-    // downstream of it ever reads frame.stats().
-    frame.clear_stats();
+    // downstream of it ever reads frame.stats(). In-place Clear() rather
+    // than clear_stats(), which would delete/re-allocate the submessage
+    // every batch -- see jammer_service/main.cpp.
+    frame.mutable_stats()->Clear();
 
     frame.SerializeToString(&payload);
     if (!netutil::SendMessage(downstream_fd, payload)) {

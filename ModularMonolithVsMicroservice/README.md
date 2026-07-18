@@ -158,10 +158,16 @@ common/include/*_avx.h, common/src/*_avx.cpp   AVX2-vectorized detector/jammer p
 monolith/host/avx_monolith_main.cpp   Entry point for avx_monolith_app
 monolith/host/verify_avx_variant_main.cpp   Standalone tolerance + exact-match correctness check
 
+tests/pulsecore_tests.cpp   C++ unit tests (framework-free, run via ctest) -- see "Tests" below
+python/tests/               Python unit tests (stdlib unittest), mirroring the C++ suite
+  test_pulsecore.py           pulsecore algorithms + framing, same golden values as the C++ suite
+  test_variants.py            numba/numpy kernel parity (skips cleanly if deps missing)
+
 scripts/run_monolith.sh              Build + run the C++ monolith
 scripts/run_microservices.sh         Build + run the C++ five-service chain
 scripts/run_avx_monolith.sh          Build + run the AVX2 C++ variant
 scripts/verify_avx_variant.sh        Build + run the AVX2 variant's correctness check
+scripts/run_tests.sh                 Build + run both unit-test suites (ctest + unittest)
 scripts/benchmark.sh                 Build + time N runs of the C++ architectures, wall clock (includes startup)
 scripts/gen_python_proto.sh          Regenerate python/pulsecore/pulse_pb2.py
 scripts/run_python_monolith.sh       Run the Python monolith
@@ -487,14 +493,19 @@ Two changes fixed this:
    chain where the raw samples are done being useful: right after
    `jammer`, the last of the three.
 2. **Clear each field once nothing downstream needs it.**
-   `jammer_service` calls `frame.clear_iq()` before forwarding to
+   `jammer_service` empties `frame.iq` before forwarding to
    `stats_service`, since neither `stats_service` nor
    `deinterleave_service` ever reads it. Every forwarding stage
    (`spectrogram_service`, `jammer_service`, `stats_service`) also clears
    its *own* summary field right after using it locally, since no stage
    ever reads another stage's summary — only the reordering was needed
    for `iq`, since it's read by three stages spread across the chain, but
-   each summary is written and consumed by exactly one.
+   each summary is written and consumed by exactly one. (How the
+   clearing is spelled matters more than this section originally knew:
+   these are now in-place `mutable_x()->Clear()` calls, not the
+   generated `clear_x()` accessors, which *delete and re-allocate* the
+   submessage every batch on a non-arena message — see "Profile-driven
+   optimization, round 2" below for how profiling caught that.)
 
 The effect is concrete and measurable. At this repo's current scale (see
 "Scale" near the top of this document — 10,000 samples/batch, 1000 pulses
@@ -1188,21 +1199,24 @@ rounds once instead of twice and would silently produce a different
 last bit than the scalar version's separate multiply-then-add, for
 every sample.)
 
-**Why IQ generation isn't vectorized in numpy_variant.** The xorshift32
+**Why the RNG isn't vectorized in numpy_variant.** The xorshift32
 RNG is a genuinely sequential recurrence -- each state depends on the
 previous one -- which doesn't rewrite into bulk array ops without a
 materially more advanced technique (jump-ahead via the RNG's underlying
 linear-recurrence structure over GF(2), computable but out of proportion
-for what this variant is demonstrating). `numpy_monolith_app.py` instead
-generates each batch with the existing `pulsecore.iq_source` generator
-(into a real `pulse_pb2.IQBatch`) and converts it once via
-`pulsecore.array_view.extract_iq`. `numba_variant` has no such problem:
-numba JIT-compiles the sequential RNG loop directly, no rewrite
-required, and writes straight into numpy arrays with no protobuf
-round-trip for IQ data at all. That asymmetry -- one technique shrugs off
-a sequential bottleneck, the other can't without real extra work -- is
-one of the more interesting differences between the two approaches, not
-an oversight in either.
+for what this variant is demonstrating). `numba_variant` has no such
+problem: numba JIT-compiles the sequential RNG loop directly, no rewrite
+required. That asymmetry -- one technique shrugs off a sequential
+bottleneck, the other can't without real extra work -- is one of the
+more interesting differences between the two approaches, not an
+oversight in either. (As first built, numpy_variant sidestepped the
+question entirely by generating through the existing protobuf-based
+`pulsecore.iq_source` generator and converting each batch to arrays --
+until profiling measured that round-trip as its single biggest cost and
+the second optimization pass replaced it with an array-native generator
+whose only remaining Python loop is the RNG recurrence itself; see
+"Profile-driven optimization, round 2" below and
+`numpy_variant/iq_source_arrays.py`.)
 
 ### An AVX regression, caught and fixed, not just reported
 
@@ -1515,6 +1529,22 @@ architectural overhead than everything in the first optimization pass
 combined -- and it was invisible until callgrind said where the
 instructions were going.
 
+*Coda, caught by re-profiling:* the parse-side fix alone didn't finish
+the job. Re-running callgrind afterward showed `jammer_service` still
+carrying the full destruction churn -- because the generated
+*field-level* accessor `clear_iq()`, which jammer calls before
+forwarding, deletes the submessage exactly the way the message-level
+`Clear()` does, so the delete had simply relocated from the parse to the
+forward path. All the per-hop field clears are now in-place
+`mutable_x()->Clear()` calls (cost: the forwarded frame carries a
+2-byte present-but-empty field). That took `jammer_service` from 414M
+to 169M instructions. Its *wall-clock* contribution barely moved --
+jammer wasn't the chain's bottleneck stage, and a pipeline drains at
+the slowest stage's rate regardless of how much slack the others have
+-- which is itself the cleanest demonstration this repo has of the
+bottleneck rule its "Two different things are being measured" section
+describes: total chain CPU dropped ~20%, steady-state wall time didn't.
+
 ### The instructive failure: the C++ flat-array spectrogram, measured and reverted
 
 Cachegrind's headline number -- 75.7% of the monolith's L1d read-misses
@@ -1635,6 +1665,91 @@ examine, is now below 2x -- with the remaining gap being genuine
 serialize/parse/syscall work that a process boundary actually requires,
 rather than an accidental delete-and-rebuild the profiler had to
 catch.
+
+### Profiling, re-run after round 2
+
+The same instrumentation that motivated round 2, re-run against the
+finished tree to confirm each fix landed where its profile said it
+would (and to catch the one place it hadn't -- the `clear_iq()` coda
+above came from exactly this re-run):
+
+**C++ chain, per-service callgrind totals** (50,000 pulses; "before" is
+the original profiling section above):
+
+```
+                          before      after       what changed
+    detector_service       151M Ir     151M Ir    nothing (producer never parses)
+    spectrogram_service    601M Ir     336M Ir    merge-parse: iq tree reused
+    jammer_service         436M Ir     169M Ir    merge-parse + in-place field clears
+    stats_service           57M Ir      33M Ir    merge-parse: events reused
+    deinterleave_service    47M Ir      23M Ir    merge-parse: events reused
+    ----------------------------------------
+    chain total          1,292M Ir     712M Ir    7.7x the monolith's 167M -> 4.3x
+```
+
+The destruction churn is gone from every consumer -- `DestroyProtos`/
+`CreateMaybeMessage<IQSample>` fell from ~28% of `jammer_service` to
+~1% (the one-time first-batch allocation and final teardown, which is
+what those numbers *should* be).
+
+**Python builds, cProfile** (50,000 pulses, times under profiler
+overhead -- compare shapes, not absolutes):
+
+- *Monolith* (2.85s -> 1.62s profiled): the spectrogram fell from 51%
+  of runtime to 29%; IQ generation is now the largest single item.
+  There is no longer one dominant stage -- the profile is flat-ish,
+  which is where diminishing returns set in for this build.
+- *numpy* (2.08s -> 0.93s): the protobuf-to-array extraction is gone
+  from the profile entirely; the largest remaining item is the
+  sequential RNG loop in `iq_source_arrays.next_batch` (0.33s) -- the
+  one thing this variant documented as not vectorizable without
+  jump-ahead machinery. The variant is now bounded by exactly the
+  limitation its docstrings claimed.
+- *numba* (0.66s profiled, nearly all of it JIT cache loading outside
+  the steady-state timer): the hot path has effectively vanished from
+  the Python-level profile -- the largest genuine work item is the
+  spectrogram kernel at 13ms. There is nothing interpreted left to
+  optimize; further gains would have to come from the kernels
+  themselves.
+
+## Tests
+
+`./scripts/run_tests.sh` builds and runs both unit-test suites:
+
+- **C++** (`tests/pulsecore_tests.cpp`, run via `ctest`): every
+  pulsecore algorithm, the TCP framing layer (round-trip, empty
+  payload, >1MB partial-read/write paths, peer-close semantics), and --
+  when the AVX2 variant was built -- exact-match parity for the AVX2
+  detector and tolerance parity for the AVX2 jammer. Framework-free on
+  purpose: a CHECK macro and a failure count keep the repo's dependency
+  footprint at zero.
+- **Python** (`python/tests/`, stdlib `unittest`): mirrors the C++
+  suite case for case, plus kernel-parity tests for the numba/numpy
+  variants that *skip* (not fail) when those optional dependencies
+  aren't installed.
+
+Three details worth knowing about the suites' design:
+
+- **The golden values are shared.** Both suites assert the same pinned
+  doubles for the synthetic generator's output (sample 0, 7, 8, and
+  107 of a seed-42 run). The repo's cross-language bit-identity claim
+  stops being something verified occasionally by output diff and
+  becomes something every test run enforces in both languages
+  independently.
+- **They cover what the synthetic signal can't.** At this repo's
+  constants the batch size is an exact multiple of the pulse period,
+  so a pulse never straddles a batch boundary in any benchmark run --
+  but the detector state machine (in all four implementations: scalar
+  C++, AVX2, pure Python, and both variant kernels) explicitly supports
+  it, and only these tests exercise it.
+- **One test documents a limitation instead of hiding it.** The
+  two-emitter deinterleaver test constructs its input so the first
+  emitter's PRI is established before the second appears, with a
+  comment explaining why: two trains interleaved from a cold start get
+  their seed pulses merged -- an inherent property of the simplified
+  sequential-PRI algorithm. The first draft of that test assumed
+  otherwise, failed, and the failure was the algorithm telling the
+  truth about itself; the test now pins the documented behavior.
 
 ## Correctness
 

@@ -105,8 +105,13 @@ int main(int argc, char** argv) {
 
     // jammer_service (next hop) only reads frame.iq(); nothing downstream
     // of it ever reads frame.spectrogram(), so there's no reason to keep
-    // paying to serialize and transmit it past this point.
-    frame.clear_spectrogram();
+    // paying to serialize and transmit it past this point. In-place
+    // Clear() rather than clear_spectrogram(), which would *delete* the
+    // submessage (and its two heap-allocated repeated-double fields)
+    // every batch -- see jammer_service/main.cpp for the full story on
+    // this codegen behavior; the wire cost of the resulting
+    // present-but-empty field is 2 bytes.
+    frame.mutable_spectrogram()->Clear();
 
     frame.SerializeToString(&payload);
     if (!netutil::SendMessage(downstream_fd, payload)) {

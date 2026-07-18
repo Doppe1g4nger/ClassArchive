@@ -94,8 +94,22 @@ int main(int argc, char** argv) {
     // frame.iq() or frame.jam() -- this is the last stage that needs the
     // raw samples, so drop them here instead of paying to move the
     // biggest message in the pipeline across two more hops unused.
-    frame.clear_iq();
-    frame.clear_jam();
+    //
+    // mutable_iq()->Clear(), NOT clear_iq(): the generated clear_iq()
+    // *deletes* the submessage on a non-arena message (see pulse.pb.h),
+    // which would throw away the 10,000 cached IQSample objects the
+    // merge-parse pattern above exists to preserve -- profiling round 2
+    // caught exactly that: after the parse-side fix landed, this
+    // service's allocation churn didn't move until this line changed
+    // too, because the delete had just relocated from the parse's
+    // implicit Clear() to this explicit one. In-place Clear() keeps the
+    // elements cached; the only cost is that the forwarded frame
+    // carries a *present-but-empty* iq field -- 2 bytes of wire (tag +
+    // zero length) versus re-heap-allocating the whole 10,000-element
+    // tree every batch. Same reasoning for jam (much smaller, but the
+    // same single line either way).
+    frame.mutable_iq()->Clear();
+    frame.mutable_jam()->Clear();
 
     frame.SerializeToString(&payload);
     if (!netutil::SendMessage(downstream_fd, payload)) {

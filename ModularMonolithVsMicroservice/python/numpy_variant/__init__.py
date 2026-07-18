@@ -11,7 +11,12 @@ equivalent within a small floating-point tolerance. See
 kernels.py's module docstring for exactly why, and
 verify_numpy_variant.py for the actual measured tolerance.
 
-pulse_stats and the deinterleaver are reused from pulsecore as-is, same
-reasoning as numba_variant: they run over the much smaller `events`
-list, never the bottleneck either variant targets.
+pulse_stats and the deinterleaver are reused from pulsecore as-is: they
+run over the much smaller `events` list (~1,000/batch, not 10,000
+samples) and have never shown up as this variant's bottleneck --
+cProfile puts its remaining cost in the sequential RNG loop, not these
+stages. (numba_variant started from the same reasoning and later jitted
+its stats/deinterleaver anyway, because *there* the compiled kernels got
+fast enough that the pure-Python seams became the dominant remaining
+cost -- a threshold this variant's slower kernels never crossed.)
 """
