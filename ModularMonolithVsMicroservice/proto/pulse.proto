@@ -73,3 +73,21 @@ message EmitterTrack {
 message DeinterleaveSummary {
   repeated EmitterTrack tracks = 1;
 }
+
+// The envelope that flows through the pipeline as a single linear chain
+// -- detector -> stats -> deinterleaver -> spectrogram -> jammer -- rather
+// than fanning out from a hub. Each stage reads the fields it needs and
+// writes its own field before passing the frame to the next stage, so by
+// the end of the chain it carries every stage's running summary. iq is
+// populated once per batch and never modified again; events is populated
+// by the detector stage; the four summary fields are each owned by
+// exactly one stage and are the running (cumulative) total as of this
+// batch, same as before.
+message PipelineFrame {
+  IQBatch iq = 1;
+  PulseEventBatch events = 2;
+  PulseSummary stats = 3;
+  DeinterleaveSummary deinterleave = 4;
+  SpectrogramSummary spectrogram = 5;
+  JamSummary jam = 6;
+}

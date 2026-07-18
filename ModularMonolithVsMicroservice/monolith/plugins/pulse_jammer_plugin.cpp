@@ -1,6 +1,6 @@
 // Built into libpulse_jammer_plugin.so and dlopen()'d by monolith_app.
-// Wraps pulsecore::JammerDetector behind the typed C++ ABI defined in
-// module_api.h.
+// Fifth and final stage of the pipeline chain (detector -> stats ->
+// deinterleaver -> spectrogram -> jammer). Wraps pulsecore::JammerDetector.
 
 #include <cstdio>
 
@@ -34,10 +34,12 @@ void pulse_module_destroy(pulse_module_t handle) {
   delete static_cast<JammerModule*>(handle);
 }
 
-void pulse_jammer_process(pulse_module_t handle, const pulse::IQBatch& batch,
-                           pulse::JamSummary* out) {
+// Reads frame->iq (populated once, before the chain starts) and writes
+// frame->jam. By the time the frame reaches this last stage it carries
+// every earlier stage's output too.
+void pulse_stage_process(pulse_module_t handle, pulse::PipelineFrame* frame) {
   auto* module = static_cast<JammerModule*>(handle);
-  module->detector.Process(batch, out);
+  module->detector.Process(frame->iq(), frame->mutable_jam());
 }
 
 }  // extern "C"

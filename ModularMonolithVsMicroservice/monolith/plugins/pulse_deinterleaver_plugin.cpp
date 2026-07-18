@@ -1,6 +1,6 @@
 // Built into libpulse_deinterleaver_plugin.so and dlopen()'d by
-// monolith_app. Wraps pulsecore::Deinterleaver behind the typed C++ ABI
-// defined in module_api.h.
+// monolith_app. Third stage of the pipeline chain (detector -> stats ->
+// deinterleaver -> spectrogram -> jammer). Wraps pulsecore::Deinterleaver.
 
 #include <cstdio>
 
@@ -34,10 +34,11 @@ void pulse_module_destroy(pulse_module_t handle) {
   delete static_cast<DeinterleaverModule*>(handle);
 }
 
-void pulse_deinterleaver_process(pulse_module_t handle, const pulse::PulseEventBatch& batch,
-                                  pulse::DeinterleaveSummary* out) {
+// Reads frame->events (populated by the detector stage) and writes
+// frame->deinterleave.
+void pulse_stage_process(pulse_module_t handle, pulse::PipelineFrame* frame) {
   auto* module = static_cast<DeinterleaverModule*>(handle);
-  module->deinterleaver.Process(batch, out);
+  module->deinterleaver.Process(frame->events(), frame->mutable_deinterleave());
 }
 
 }  // extern "C"

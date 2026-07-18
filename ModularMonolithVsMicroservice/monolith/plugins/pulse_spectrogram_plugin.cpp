@@ -1,6 +1,6 @@
 // Built into libpulse_spectrogram_plugin.so and dlopen()'d by
-// monolith_app. Wraps pulsecore::SpectrogramAnalyzer behind the typed
-// C++ ABI defined in module_api.h.
+// monolith_app. Fourth stage of the pipeline chain (detector -> stats ->
+// deinterleaver -> spectrogram -> jammer). Wraps pulsecore::SpectrogramAnalyzer.
 
 #include <cstdio>
 
@@ -32,10 +32,11 @@ void pulse_module_destroy(pulse_module_t handle) {
   delete static_cast<SpectrogramModule*>(handle);
 }
 
-void pulse_spectrogram_process(pulse_module_t handle, const pulse::IQBatch& batch,
-                                pulse::SpectrogramSummary* out) {
+// Reads frame->iq (populated once, before the chain starts) and writes
+// frame->spectrogram.
+void pulse_stage_process(pulse_module_t handle, pulse::PipelineFrame* frame) {
   auto* module = static_cast<SpectrogramModule*>(handle);
-  module->analyzer.Process(batch, out);
+  module->analyzer.Process(frame->iq(), frame->mutable_spectrogram());
 }
 
 }  // extern "C"

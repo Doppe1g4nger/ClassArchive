@@ -1,7 +1,8 @@
 // Built into libpulse_detector_plugin.so and dlopen()'d by monolith_app.
-// Wraps pulsecore::PulseDetector behind the typed C++ ABI defined in
-// module_api.h -- no serialization, since this module and its host share
-// one in-process definition of every pulse:: type (see module_api.h).
+// First stage of the pipeline chain (detector -> stats -> deinterleaver
+// -> spectrogram -> jammer). Wraps pulsecore::PulseDetector -- no
+// serialization, since this module and its host share one in-process
+// definition of every pulse:: type (see module_api.h).
 
 #include <cstdio>
 
@@ -36,11 +37,12 @@ void pulse_module_destroy(pulse_module_t handle) {
   delete static_cast<DetectorModule*>(handle);
 }
 
-void pulse_detector_process(pulse_module_t handle, const pulse::IQBatch& batch,
-                             pulse::PulseEventBatch* out) {
+// First stage of the chain: reads frame->iq (populated by the caller
+// before this stage runs) and writes frame->events.
+void pulse_stage_process(pulse_module_t handle, pulse::PipelineFrame* frame) {
   auto* module = static_cast<DetectorModule*>(handle);
-  out->Clear();
-  module->detector.Process(batch, out);
+  frame->mutable_events()->Clear();
+  module->detector.Process(frame->iq(), frame->mutable_events());
 }
 
 }  // extern "C"

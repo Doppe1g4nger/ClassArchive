@@ -6,7 +6,14 @@ cd "$(dirname "$0")/.."
 
 RUNS="${1:-50}"
 NUM_PULSES="${2:-1000}"
-BASE_PORT="${3:-53100}"
+# Default kept below the kernel's ephemeral port range (usually
+# 32768-60999, check /proc/sys/net/ipv4/ip_local_port_range) -- every
+# service in the microservice chain also makes outbound connections,
+# which get assigned ephemeral source ports by the OS, and a listener
+# bound inside that range can randomly lose a bind() race against one of
+# those. Each run below claims its own block of 10 ports (four listeners
+# plus headroom), so keep BASE_PORT + RUNS*10 + 3 under 32768 too.
+BASE_PORT="${3:-20000}"
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build build -j"$(nproc)" >/dev/null
@@ -29,12 +36,30 @@ done
 echo "done"
 echo
 
-echo "== microservices (detector_service + stats/spectrogram/jammer/deinterleave services) =="
+wait_for_port() {
+  local port="$1"
+  local port_hex
+  port_hex=$(printf '%04X' "$port")
+  for attempt in $(seq 1 100); do
+    if awk -v p=":${port_hex}" '$2 ~ p && $4=="0A" {found=1} END{exit !found}' /proc/net/tcp; then
+      return 0
+    fi
+    sleep 0.02
+  done
+  return 1
+}
+
+echo "== microservices (detector -> stats -> deinterleave -> spectrogram -> jammer chain) =="
 for i in $(seq 1 "$RUNS"); do
   # Each run gets its own block of 4 ports (base + i*10 + offset 0..3) so
   # consecutive runs can't collide even if a prior run's sockets are
   # still winding down.
   base=$((BASE_PORT + i * 10))
+  port_stats=$((base))
+  port_deinterleave=$((base + 1))
+  port_spectrogram=$((base + 2))
+  port_jammer=$((base + 3))
+
   # Timer starts before any service is even launched, so their process
   # startup and library load count toward the total -- the same way
   # monolith_app's single process-start-to-exit measurement above
@@ -42,34 +67,30 @@ for i in $(seq 1 "$RUNS"); do
   # earlier version of this script did) would unfairly hide the
   # microservice architecture's process-startup overhead.
   start=$(date +%s.%N)
-  "$BIN/stats_service" "$base" >/dev/null 2>&1 &
-  pid_stats=$!
-  "$BIN/spectrogram_service" "$((base + 1))" >/dev/null 2>&1 &
-  pid_spectrogram=$!
-  "$BIN/jammer_service" "$((base + 2))" >/dev/null 2>&1 &
+
+  # Each middle service connects downstream before it can accept
+  # upstream, so startup order is the reverse of data flow (same
+  # constraint as scripts/run_microservices.sh). Each wait_for_port call
+  # is itself counted as part of the microservice architecture's cost:
+  # it's synchronization overhead the monolith never pays.
+  "$BIN/jammer_service" "$port_jammer" >/dev/null 2>&1 &
   pid_jammer=$!
-  "$BIN/deinterleave_service" "$((base + 3))" >/dev/null 2>&1 &
+  wait_for_port "$port_jammer"
+
+  "$BIN/spectrogram_service" "$port_spectrogram" 127.0.0.1 "$port_jammer" >/dev/null 2>&1 &
+  pid_spectrogram=$!
+  wait_for_port "$port_spectrogram"
+
+  "$BIN/deinterleave_service" "$port_deinterleave" 127.0.0.1 "$port_spectrogram" >/dev/null 2>&1 &
   pid_deinterleave=$!
+  wait_for_port "$port_deinterleave"
 
-  # Wait for every listener to actually bind rather than guessing with a
-  # fixed sleep. Polls /proc/net/tcp for LISTEN state on each port instead
-  # of probing with a real connect() -- each service only accept()s once
-  # (backlog=1), so a throwaway probe connection could itself get
-  # accepted and steal the slot detector_service needs. This wait is
-  # itself counted as part of the microservice architecture's cost: it's
-  # synchronization overhead the monolith never pays.
-  for offset in 0 1 2 3; do
-    port_hex=$(printf '%04X' "$((base + offset))")
-    for attempt in $(seq 1 100); do
-      if awk -v p=":${port_hex}" '$2 ~ p && $4=="0A" {found=1} END{exit !found}' /proc/net/tcp; then
-        break
-      fi
-      sleep 0.02
-    done
-  done
+  "$BIN/stats_service" "$port_stats" 127.0.0.1 "$port_deinterleave" >/dev/null 2>&1 &
+  pid_stats=$!
+  wait_for_port "$port_stats"
 
-  "$BIN/detector_service" 127.0.0.1 "$base" "$NUM_PULSES" >/dev/null
-  wait "$pid_stats" "$pid_spectrogram" "$pid_jammer" "$pid_deinterleave"
+  "$BIN/detector_service" 127.0.0.1 "$port_stats" "$NUM_PULSES" >/dev/null
+  wait "$pid_stats" "$pid_deinterleave" "$pid_spectrogram" "$pid_jammer"
   end=$(date +%s.%N)
   echo "$end - $start" | bc >> "$MICRO_TIMES"
 done
