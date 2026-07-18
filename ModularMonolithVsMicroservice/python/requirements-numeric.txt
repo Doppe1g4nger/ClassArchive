@@ -1,0 +1,7 @@
+-r requirements.txt
+# Only needed for numpy_variant/ and numba_variant/ -- every other
+# Python build in this repo (monolith, microservice, multiproc) has no
+# dependency beyond protobuf, and stays that way. See README.md's
+# "Going further" section for what these two variants are.
+numpy
+numba

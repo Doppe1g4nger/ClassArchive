@@ -99,6 +99,53 @@ target_include_directories(monolith_app PRIVATE monolith/include)
 target_link_libraries(monolith_app PRIVATE pulsecore ${CMAKE_DL_LIBS})
 
 # ---------------------------------------------------------------------------
+# AVX2 variant: a fourth C++ build, answering "optimize further with AVX
+# instructions?" from the correctness-audit follow-up. Two of pulsecore's
+# five algorithms (the detector's threshold decision, the jammer's power
+# sum) get AVX2-vectorized ports -- pulse_detector_avx.cpp/jammer_avx.cpp
+# -- built as their own small library so the original, unmodified
+# pulsecore stays exactly as it was for every other target above (the
+# same "add a variant, don't replace the baseline" approach the Python
+# side's multiproc/numba_variant/numpy_variant builds already use). The
+# spectrogram, stats, and deinterleaver stages are unmodified pulsecore
+# code, reused directly -- see monolith/host/avx_monolith_main.cpp and
+# common/include/pulse_detector_avx.h/jammer_avx.h for why AVX wasn't
+# applied to the spectrogram (its per-sample cos()/sin() calls have no
+# portable, dependency-free vectorized equivalent) and why the detector
+# stays bit-identical to the scalar version while the jammer doesn't.
+#
+# Guarded behind an actual compiler-support check rather than assumed,
+# same reasoning as the LTO check above: skip the target gracefully
+# instead of failing the whole build on a toolchain/CPU that can't do it.
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-mavx2 -mfma" COMPILER_SUPPORTS_AVX2_FMA)
+if(COMPILER_SUPPORTS_AVX2_FMA)
+  add_library(pulsecore_avx STATIC
+    common/src/pulse_detector_avx.cpp
+    common/src/jammer_avx.cpp
+  )
+  set_target_properties(pulsecore_avx PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(pulsecore_avx PUBLIC common/include)
+  target_link_libraries(pulsecore_avx PUBLIC pulse_proto)
+  # -ffp-contract=off: stop the compiler from silently fusing
+  # pulse_detector_avx.cpp's separate multiply+add into one FMA
+  # instruction -- that fusion rounds once instead of twice and would
+  # break the detector's bit-identical guarantee. jammer_avx.cpp uses
+  # FMA explicitly via intrinsics regardless of this flag (its output
+  # isn't bit-identical to begin with -- see jammer_avx.h).
+  target_compile_options(pulsecore_avx PRIVATE -mavx2 -mfma -ffp-contract=off)
+
+  add_executable(avx_monolith_app monolith/host/avx_monolith_main.cpp)
+  target_include_directories(avx_monolith_app PRIVATE monolith/include)
+  target_link_libraries(avx_monolith_app PRIVATE pulsecore pulsecore_avx)
+
+  add_executable(verify_avx_variant monolith/host/verify_avx_variant_main.cpp)
+  target_link_libraries(verify_avx_variant PRIVATE pulsecore pulsecore_avx)
+else()
+  message(STATUS "Compiler doesn't support -mavx2 -mfma -- skipping avx_monolith_app")
+endif()
+
+# ---------------------------------------------------------------------------
 # Microservice pair: two executables, connected by protobuf over TCP.
 # ---------------------------------------------------------------------------
 add_library(netutil STATIC microservice/net/framing.cpp)

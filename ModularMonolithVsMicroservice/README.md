@@ -144,14 +144,31 @@ python/                    Python port of the same architecture, see "Python por
     detector_worker.py ... deinterleave_worker.py   Mirror the 5 microservice stages' algorithms
                                 and field-clearing exactly, just reading/writing pipe ends
     multiproc_monolith_app.py  Entry point: forks all five workers, wires them, prints the result
+  numba_variant/              JIT-compiles pulsecore's existing scalar loops -- see "Going further" below
+    kernels.py                  @njit ports of detector/spectrogram/jammer/IQ generation
+    numba_monolith_app.py       Entry point: warms up the JIT, runs the timed loop, prints the result
+  numpy_variant/               Rewrites detector/spectrogram/jammer as bulk numpy array ops
+    kernels.py                   Vectorized ports; not bit-identical to the rest of the repo (see below)
+    numpy_monolith_app.py        Entry point
+    verify_numpy_variant.py      Standalone tolerance + pulse-straddling correctness check
+
+common/include/*_avx.h, common/src/*_avx.cpp   AVX2-vectorized detector/jammer ports (C++), a
+                              fourth C++ architecture alongside monolith/microservices --
+                              see "Going further" below
+monolith/host/avx_monolith_main.cpp   Entry point for avx_monolith_app
+monolith/host/verify_avx_variant_main.cpp   Standalone tolerance + exact-match correctness check
 
 scripts/run_monolith.sh              Build + run the C++ monolith
 scripts/run_microservices.sh         Build + run the C++ five-service chain
+scripts/run_avx_monolith.sh          Build + run the AVX2 C++ variant
+scripts/verify_avx_variant.sh        Build + run the AVX2 variant's correctness check
 scripts/benchmark.sh                 Build + time N runs of the C++ architectures, wall clock (includes startup)
 scripts/gen_python_proto.sh          Regenerate python/pulsecore/pulse_pb2.py
 scripts/run_python_monolith.sh       Run the Python monolith
 scripts/run_python_microservices.sh  Run the Python five-service chain
 scripts/run_python_multiproc.sh      Run the Python forked-worker build
+scripts/run_python_numba.sh          Run the numba-JIT variant
+scripts/run_python_numpy.sh          Run the numpy-vectorized variant
 scripts/benchmark_python.sh          Time N runs of all four, wall clock (includes startup)
 scripts/benchmark_steady_state.sh    Time N runs of all five, steady-state only (startup excluded)
 ```
@@ -187,6 +204,13 @@ pip install -r python/requirements.txt
 `scripts/run_python_monolith.sh` and `scripts/run_python_microservices.sh`
 both call `gen_python_proto.sh` themselves, so this step is only needed if
 you're invoking the `python/` scripts directly.
+
+`numba_variant/` and `numpy_variant/` (see "Going further" below) need
+numpy and numba on top of that -- `pip install -r
+python/requirements-numeric.txt` instead of `requirements.txt`. No other
+build in this repo (monolith, microservice, multiproc) has this
+dependency, and none of them ever will just to keep one variant's
+`import` list shorter.
 
 ## Running
 
@@ -1096,6 +1120,163 @@ visible cost instead of a hidden one -- a reminder that "optimize the
 common path" can un-mask a different bottleneck rather than eliminate
 the bottleneck concept entirely.
 
+## Going further: AVX2, numba, numpy
+
+A direct follow-up to the hyperoptimization pass above: can the same
+five algorithms go faster still with AVX instructions (C++) or
+numpy/numba (Python)? Three more variants, one per technique, each
+answering the question honestly rather than assuming yes:
+
+- **`avx_monolith_app`** (C++) -- `common/include/pulse_detector_avx.h` /
+  `jammer_avx.h` hand-vectorize the detector's threshold decision and the
+  jammer's power-sum reduction with AVX2 intrinsics. Spectrogram, stats,
+  and the deinterleaver are unmodified pulsecore code. Built as its own
+  library (`pulsecore_avx`) and executable, guarded behind an actual
+  `check_cxx_compiler_flag` check in `CMakeLists.txt` -- the original
+  `pulsecore` and every target that links it are untouched, same
+  "add a variant, don't replace the baseline" approach the Python side's
+  multiproc/numba/numpy builds already use.
+- **`python/numba_variant/`** -- JIT-compiles the *exact same* scalar,
+  per-sample loops already in `pulsecore/` (detector, spectrogram,
+  jammer, and IQ generation) with `@njit`, instead of rewriting them.
+- **`python/numpy_variant/`** -- rewrites detector, spectrogram, and
+  jammer as bulk numpy array operations instead of per-sample loops.
+  IQ generation is not rewritten (see below for why).
+
+Run them with `./scripts/run_avx_monolith.sh [num_pulses]`,
+`./scripts/run_python_numba.sh [num_pulses]`, and
+`./scripts/run_python_numpy.sh [num_pulses]` (the latter two need
+`pip install -r python/requirements-numeric.txt` -- numpy and numba
+aren't a dependency of anything else in this repo and stay that way).
+
+### Two of these are not bit-identical to the rest of the repo, and that's expected
+
+Every build up to this point in the README has been byte-for-byte
+identical on every field, and that bar mattered enough to build
+dedicated tooling around (`scripts/verify_avx_variant.sh`,
+`python/numpy_variant/verify_numpy_variant.py`) rather than relax it
+quietly. **numba_variant is still bit-identical** -- it compiles the same
+operations in the same order, so a sequential accumulation like `re +=
+...` inside a loop is still a sequential accumulation after JIT
+compilation, just compiled instead of interpreted. **numpy_variant and
+the AVX2 jammer are not**, and can't be while staying vectorized:
+`np.sum()` and a horizontal AVX2 reduction both combine partial results
+in a different order than the scalar loop's single running total
+(pairwise summation, four SIMD lanes reduced at the end), and
+floating-point addition isn't associative -- reordering it changes the
+last few bits of the result even though every input and every operation
+performed is identical. This is verified, not just asserted: both
+verification scripts measure the actual relative error against the
+scalar reference (numpy_variant: ~3e-11; the AVX2 jammer: ~2e-15, both
+five to nine orders of magnitude below the 1e-9 tolerance either checks
+against) and include a dedicated test for a pulse straddling a batch
+boundary -- a case this repo's own signal never produces at its current
+batch-size/period constants, but the vectorized detector code still has
+to handle correctly regardless.
+
+The **AVX2 detector stays bit-identical**, unlike the jammer, because its
+vectorized part is a pure per-element computation (`i*i+q*q`, then
+compare), not a reduction -- IEEE-754 guarantees a multiply or add
+produces the same result regardless of what other SIMD lanes are doing,
+since there's no cross-element combination whose order could change.
+(It also takes real care to stay that way: the two vector ops used
+--separate multiply, then add-- are deliberately *not* fused into one
+FMA instruction, via `-ffp-contract=off` on that build target. An FMA
+rounds once instead of twice and would silently produce a different
+last bit than the scalar version's separate multiply-then-add, for
+every sample.)
+
+**Why IQ generation isn't vectorized in numpy_variant.** The xorshift32
+RNG is a genuinely sequential recurrence -- each state depends on the
+previous one -- which doesn't rewrite into bulk array ops without a
+materially more advanced technique (jump-ahead via the RNG's underlying
+linear-recurrence structure over GF(2), computable but out of proportion
+for what this variant is demonstrating). `numpy_monolith_app.py` instead
+generates each batch with the existing `pulsecore.iq_source` generator
+(into a real `pulse_pb2.IQBatch`) and converts it once via
+`pulsecore.array_view.extract_iq`. `numba_variant` has no such problem:
+numba JIT-compiles the sequential RNG loop directly, no rewrite
+required, and writes straight into numpy arrays with no protobuf
+round-trip for IQ data at all. That asymmetry -- one technique shrugs off
+a sequential bottleneck, the other can't without real extra work -- is
+one of the more interesting differences between the two approaches, not
+an oversight in either.
+
+### An AVX regression, caught and fixed, not just reported
+
+The first working version of the AVX2 detector and jammer measured
+*slower* than the plain scalar C++ versions -- not a rounding error, a
+consistent 10-30% regression, confirmed with 15-run comparisons before
+concluding it was real. The cause: that version extracted every sample's
+`i`/`q`/`sample_index` into batch-sized heap arrays first, ran the
+vectorized comparison as a second pass, then a third pass for the
+sequential pulse state machine. protobuf's repeated `IQSample` field is
+a repeated *message* field -- `RepeatedPtrField` stores pointers to
+separately heap-allocated objects, not a contiguous `double[]` -- so
+reading a sample's fields means chasing a pointer no matter what happens
+to the value afterward. That pointer-chase, not the handful of FLOPs in
+`i*i+q*q`, is this loop's actual cost, and the three-pass version paid
+real extra memory traffic (writing, then re-reading, batch-sized
+intermediate arrays) to vectorize arithmetic that was never the
+bottleneck.
+
+The fix: process in chunks of 4 samples using small, register-resident
+scratch arrays instead of batch-sized ones, so the pointer-chase happens
+exactly once per sample -- matching the scalar version's memory
+behavior -- with the compare itself still vectorized. That closed most
+of the gap: at this repo's scale, the AVX2 detector and jammer now land
+within noise of their scalar equivalents (sometimes a few percent
+faster, sometimes a few percent slower, run to run), rather than
+consistently 10-30% slower.
+
+**The honest net finding: AVX2 doesn't meaningfully help this specific
+workload**, and the reason is itself the useful part of the answer. This
+pipeline's per-sample work is only a few FLOPs -- nowhere near enough
+arithmetic intensity to be compute-bound. Its actual cost is protobuf's
+memory access pattern (one pointer dereference per sample, in an array
+of pointers rather than an array of values), and SIMD instruction width
+cannot fix a memory-access-pattern bottleneck -- it only makes the
+arithmetic faster, and the arithmetic was never what was slow. Getting a
+real win here would need a data-layout change (e.g. `repeated double`
+fields instead of `repeated IQSample`, giving a genuinely contiguous,
+directly SIMD-loadable buffer) -- which would mean changing
+`proto/pulse.proto`, the wire format every build in this repo shares,
+for the benefit of one variant. Out of proportion for what this
+exploration set out to answer, so left as the honest conclusion instead:
+*this* algorithm, on *this* data layout, is memory-bound, not
+compute-bound, and hand-rolled AVX2 was never going to fix that no
+matter how carefully it was written.
+
+### Results
+
+Same steady-state methodology as "Steady-state benchmark" above (timer
+excludes JIT warm-up/compilation the same way it excludes `dlopen()`/
+`import` elsewhere), 50,000 pulses:
+
+```
+                            mean        vs. own baseline
+    C++ monolith (scalar)   21.67ms
+    C++ monolith (AVX2)     21.69ms     1.00x (no meaningful change -- see above)
+    Python monolith       1597.49ms
+    Python numba           131.48ms     12.15x faster
+    Python numpy          1209.78ms     1.32x faster
+```
+
+**numba is the standout result**, and it's a direct consequence of what
+it doesn't have to give up: it compiles the *existing* algorithm as-is,
+so there's no vectorization tax to pay anywhere, including IQ
+generation, where numpy_variant has to fall back to the interpreted
+generator specifically because numpy can't cheaply vectorize a
+sequential RNG. **numpy's more modest 1.32x** is the honest cost of that
+fallback plus the `pulse_pb2.IQBatch` round-trip it still pays for
+detector/spectrogram/jammer's inputs (`array_view.extract_iq` is one
+Python-level attribute read per sample per array -- the same class of
+cost the original interpreted loop paid, not eliminated by vectorizing
+what happens *after* the extraction). **AVX2's ~1.00x** is the most
+surprising result of the three only if you expect vectorization to
+always help; once the actual bottleneck (pointer-chasing, not
+arithmetic) is identified, it's the expected one.
+
 ## Correctness
 
 Every change in this repo's history was re-verified the same way: run the
@@ -1119,7 +1300,15 @@ never leaves a process hung or a result nondeterministic), and after the
 "Correctness audit and hyperoptimization pass" above (diffed against a
 full clean rebuild and proto regeneration, all five builds still
 byte-identical on every field after every optimization -- see that
-section for specifics). Clearing a field a
+section for specifics), and after adding the AVX2/numba/numpy variants
+in "Going further" above -- eight builds now checked against a full
+clean rebuild and proto regeneration, with numba_variant and the AVX2
+detector held to the same exact byte-for-byte bar as the original five
+(see `scripts/verify_avx_variant.sh`), and numpy_variant plus the AVX2
+jammer held to a measured, documented floating-point tolerance instead,
+since exact equality isn't achievable for a vectorized reduction and
+claiming otherwise would be dishonest (see
+`python/numpy_variant/verify_numpy_variant.py`). Clearing a field a
 stage already consumed and copying its value into a local variable first
 (see `spectrogram_service`/`jammer_service`/`stats_service`'s
 `last_summary` pattern, in both languages) is exactly the kind of change
