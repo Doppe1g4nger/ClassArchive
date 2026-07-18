@@ -129,9 +129,23 @@ microservice/               Five-executable build, wired as a linear chain over 
   stats_service/main.cpp        Chain stage 4: accepts jammer_service, forwards to deinterleave_service
   deinterleave_service/main.cpp Chain stage 5 (sink only): accepts stats_service, doesn't forward
 
-scripts/run_monolith.sh       Build + run the monolith
-scripts/run_microservices.sh  Build + run the five-service chain
-scripts/benchmark.sh          Build + time N runs of each architecture
+python/                    Python port of the same architecture, see "Python ports" below
+  pulsecore/                 Mirrors common/: same algorithms (including the phasor-rotation
+                              and other optimizations below), generated pulse_pb2.py
+  monolith/
+    stages.py                  Mirrors monolith/plugins/*.cpp: 5 stage wrapper classes
+    monolith_app.py            Mirrors monolith/host/monolith_main.cpp
+  microservice/
+    framing.py                 Mirrors microservice/net/framing.cpp (identical wire format)
+    detector_service.py ... deinterleave_service.py   Mirror the 5 C++ services exactly
+
+scripts/run_monolith.sh              Build + run the C++ monolith
+scripts/run_microservices.sh         Build + run the C++ five-service chain
+scripts/benchmark.sh                 Build + time N runs of the C++ architectures
+scripts/gen_python_proto.sh          Regenerate python/pulsecore/pulse_pb2.py
+scripts/run_python_monolith.sh       Run the Python monolith
+scripts/run_python_microservices.sh  Run the Python five-service chain
+scripts/benchmark_python.sh          Time N runs of all four (C++/Python x monolith/microservices)
 ```
 
 ## Building
@@ -153,6 +167,18 @@ This produces, all in `build/bin/`:
 - `detector_service`, `stats_service`, `spectrogram_service`,
   `jammer_service`, `deinterleave_service` — the microservice set
 - `libpulse_proto.so` — the generated protobuf message code, shared by everything (see note below)
+
+The Python port additionally requires Python 3.9+ and the `protobuf`
+package:
+
+```sh
+pip install -r python/requirements.txt
+./scripts/gen_python_proto.sh   # generates python/pulsecore/pulse_pb2.py
+```
+
+`scripts/run_python_monolith.sh` and `scripts/run_python_microservices.sh`
+both call `gen_python_proto.sh` themselves, so this step is only needed if
+you're invoking the `python/` scripts directly.
 
 ## Running
 
@@ -203,15 +229,78 @@ that range. A listener bound inside it can occasionally lose a bind()
 race against one of its own chain's outbound connections. Picking
 explicit ports below the ephemeral range sidesteps that entirely.)
 
-Both print the same detected pulse count, summary statistics, spectrum,
-jam-detection state, and emitter tracks, computed from the same synthetic
-IQ data (`num_pulses` rectangular pulses buried in noise, 1000 by default
-— one full buffer at this repo's scale) — that's the point: it's the same
-result, produced two structurally different ways. As a built-in
-consistency check: since the synthetic source only ever emits one
-emitter's worth of pulses, the deinterleaver should always converge to
-exactly one track whose `estimated_pri_us` and `pulses` match `stats`'
-`mean_pri_us` and `pulses` exactly.
+**Python monolith** and **Python microservices** work identically, just
+with `.py` scripts instead of compiled binaries, no `plugin_dir`, and
+their own default port block (20151+) so they don't collide with the C++
+build if both happen to run at once:
+
+```sh
+./scripts/run_python_monolith.sh [num_pulses]
+./scripts/run_python_monolith.sh 1000000     # one full second at 1,000,000 pulses/sec
+
+./scripts/run_python_microservices.sh [base_port] [num_pulses]
+./scripts/run_python_microservices.sh 20151 1000000
+```
+
+All four print the same detected pulse count, summary statistics,
+spectrum, jam-detection state, and emitter tracks, computed from the same
+synthetic IQ data (`num_pulses` rectangular pulses buried in noise, 1000
+by default — one full buffer at this repo's scale) — that's the point:
+it's the same result, produced four structurally different ways (two
+architectures times two languages). As a built-in consistency check:
+since the synthetic source only ever emits one emitter's worth of pulses,
+the deinterleaver should always converge to exactly one track whose
+`estimated_pri_us` and `pulses` match `stats`' `mean_pri_us` and `pulses`
+exactly.
+
+## Python ports
+
+`python/` is a line-for-line port of the entire C++ side: the same five
+algorithms, the same monolith-vs-chain architectures, the same wire
+format, generated from the exact same `proto/pulse.proto`. The point
+isn't to show off idiomatic Python -- it's to hold the language as close
+to the only variable as this repo can manage, so a Python-vs-C++
+benchmark (see below) measures language/runtime overhead on one fixed
+algorithm and architecture, not "well-optimized C++ vs. a rewritten
+Python design." Concretely:
+
+- **Same algorithms, including their optimizations.** The spectrogram's
+  phasor-rotation trick (see "Optimizations" below) is ported as-is
+  rather than reintroduced as a naive `cos()`/`sin()`-per-sample loop.
+  Reverting an optimization on one side of the comparison would measure
+  "algorithmic complexity" as much as "language," which isn't the
+  question being asked.
+- **Same RNG, bit-for-bit.** `pulsecore/iq_source.py` reimplements the
+  xorshift32 generator with explicit 32-bit masking after every
+  operation (Python integers don't wrap the way C++'s `uint32_t` does),
+  so both languages generate byte-identical synthetic IQ data from the
+  same seed -- confirmed by diffing output, not assumed.
+- **Same wire format.** `microservice/framing.py` sends the identical
+  4-byte-length-prefix-plus-protobuf frames as `framing.cpp`, using the
+  same `pulse.PipelineFrame` messages (compiled from `proto/pulse.proto`
+  by `protoc --python_out`, the same tool the C++ build's CMake step
+  calls). A Python service and a C++ service could talk to each other
+  without either one knowing the other's language -- this repo doesn't
+  test that combination, but it's true by construction.
+- **Same "modular" story, different mechanism.** C++'s modular monolith
+  loads plugins via `dlopen()`/`dlsym()` because that's what's needed to
+  let independently compiled `.so` files agree on a call signature at
+  runtime without sharing source. Python doesn't need any of that
+  machinery to get the same property: `import` already resolves a
+  separately authored module by name at runtime, which is why
+  `monolith/stages.py`'s five stage classes are Python's direct analog of
+  `monolith/plugins/*.cpp`'s five `.so` files, and `monolith_app.py`'s
+  `import` statements are the analog of `monolith_main.cpp`'s
+  `dlopen()` calls -- see `monolith_app.py`'s docstring for the fuller
+  version of this point.
+- **Protobuf implementation matters.** This repo's Python build uses the
+  `protobuf` PyPI package's default `upb` backend (a C extension), not
+  the pure-Python fallback implementation, which would make
+  serialization itself (not just the per-sample loops) dramatically
+  slower and muddy the comparison below. Check
+  `python -c "from google.protobuf.internal import api_implementation;
+  print(api_implementation.Type())"` prints `upb` if you're unsure which
+  one you have.
 
 ## The three new apps
 
@@ -570,24 +659,120 @@ inherently sequential (see point 1 above) while fan-out's was parallel --
 so a chain pays more fixed startup cost precisely when there's the least
 actual work to amortize it against.
 
-### Correctness
+## Python vs C++
 
-Every change in this repo's history was re-verified the same way: run
-both binaries at a small pulse count and a larger one and diff the
-printed output. The monolith and microservice builds have produced
-byte-identical summary statistics, spectrogram bins, jam-detection state,
-and deinterleaved tracks in every case, including after adding the three
-new apps, after the spectrogram phasor-rotation fix, after converting the
+`scripts/benchmark_python.sh` times all four implementations -- C++
+monolith, C++ microservices, Python monolith, Python microservices --
+against the same input. Unlike `scripts/benchmark.sh`, it defaults to the
+*small* scale (1000 pulses, one buffer) rather than 1,000,000: pure-Python
+execution of this repo's per-sample loops (the spectrogram's
+O(bins × batch_size) inner loop dominates) is roughly two orders of
+magnitude slower than the equivalent C++, so a 50-run benchmark at the
+full-second scale would take on the order of an hour. Full-scale numbers
+below come from a small number of individually timed single runs instead.
+
+### At small scale (50 runs, 1000 pulses)
+
+```
+Results over 50 runs, 1000 pulses/run:
+
+            C++ monolith  min=  6.3ms  median=  6.9ms  mean=  7.0ms  stdev= 0.5ms  max=  9.0ms
+       C++ microservices  min= 30.3ms  median= 33.4ms  mean= 34.9ms  stdev= 5.6ms  max= 61.8ms
+         Python monolith  min=112.3ms  median=120.2ms  mean=125.0ms  stdev=14.2ms  max=200.8ms
+    Python microservices  min=345.9ms  median=361.1ms  mean=369.9ms  stdev=22.4ms  max=462.2ms
+
+Python monolith is ~17.7-17.8x the C++ monolith mean
+Python microservices is ~10.6x the C++ microservices mean
+C++ microservices is ~4.7-5.3x the C++ monolith mean
+Python microservices is ~2.8-3.2x the Python monolith mean
+(two separate 50-run measurements landed in these ranges)
+```
+
+Python is an order of magnitude slower than C++ here, which is entirely
+expected: every stage's inner loop is now interpreted bytecode instead of
+compiled machine code, and even with protobuf's `upb` C-extension backend
+(see "Python ports" above), each field access on a message still goes
+through more machinery than a raw C++ struct member read. Within Python,
+the monolith beats the microservices chain by about the same kind of
+margin the C++ architectures show at this scale, for the same reason: five
+process starts and four sequential TCP handshakes are fixed costs that
+dominate when there's almost no actual work (one buffer) to amortize them
+against.
+
+### At full scale (single runs, 1,000,000 pulses -- 1 second of signal)
+
+```
+            C++ monolith         ~430-437ms
+            C++ microservices    ~1.6-1.8s
+            Python monolith      ~65-74s
+            Python microservices ~41-44s
+
+Python monolith is ~160x the C++ monolith
+Python microservices is ~25x the C++ microservices
+C++ microservices is ~3.9x the C++ monolith
+Python microservices is ~0.6x the Python monolith (i.e. FASTER)
+```
+
+**The ordering flips.** At small scale the Python monolith wins, same as
+C++; at full scale the Python *microservices* build wins -- by a wide
+margin, and reproduced twice. This is the opposite of every C++ result in
+this document, where the monolith wins at every scale tested (see
+"Benchmark" above), and it comes down to one thing C++ doesn't have:
+Python's GIL (Global Interpreter Lock) confines all bytecode execution in
+a single process to one CPU core at a time, no matter how many cores the
+machine has (this repo's test machine has 4). The Python monolith runs
+all five stages sequentially in *one* process, so it's bound to one core
+for the entire run regardless of available parallelism. The Python
+microservices chain is five separate OS processes, each with its own
+interpreter and its own GIL -- the OS scheduler can and does run them on
+different cores simultaneously, and because the chain is a genuine
+pipeline (stage N can be working on batch K while stage N-1 is already
+producing batch K+1), sustained throughput benefits from that real
+parallelism once there's enough work to keep the pipeline full. The
+process-startup and IPC costs that make microservices lose at small scale
+are still there at full scale -- they just stop mattering once 1000
+batches' worth of genuinely parallelizable work swamps them.
+
+This is a real, mechanical consequence of the language, not a quirk of
+this benchmark: in C++, "avoid inter-process communication" is close to a
+strictly dominant strategy, since C++ threads/processes have no equivalent
+of the GIL forcing single-core execution. In a GIL-bound language, that
+intuition can invert once there's enough CPU-bound work, because splitting
+work across OS processes escapes the GIL's one-core-at-a-time constraint
+in a way splitting it across function calls within one process cannot --
+"modular monolith" and "microservices" were never chosen for their
+threading properties in this repo, but in Python, one of them happens to
+get free multi-core parallelism as a side effect of being multiple
+processes, and the other one doesn't. The magnitude and crossover point of
+this effect depend on how many CPU cores are actually available -- on a
+single-core machine neither architecture could benefit, since there'd be
+nowhere for the extra processes to run in parallel.
+
+## Correctness
+
+Every change in this repo's history was re-verified the same way: run the
+relevant binaries/scripts at a small pulse count and a larger one and diff
+the printed output. All four builds -- C++ monolith, C++ microservices,
+Python monolith, Python microservices -- have produced byte-identical
+summary statistics, spectrogram bins, jam-detection state, and
+deinterleaved tracks in every case, including after adding the three new
+apps, after the spectrogram phasor-rotation fix, after converting the
 fan-out topology into a linear chain, after reordering that chain and
-clearing unused fields between hops, and after scaling the signal rate up
-to 1,000,000 pulses/sec. Clearing a field a stage already consumed and
-copying its value into a local variable first (see
-`spectrogram_service`/`jammer_service`/`stats_service`'s `last_summary`
-pattern) is exactly the kind of change that's easy to get backwards --
-clear-then-read instead of read-then-clear silently zeroes out the value
-you meant to print -- so this one got the same before/after diff
-treatment as everything else. The scale-up specifically was checked
-against `PulseSummary.mean_pri_seconds` coming out to exactly `0.000001`
-(confirming the 1,000,000-pulse/sec rate) and the deinterleaver's single
-track's `pulse_count`/`estimated_pri_seconds` matching `stats`' exactly,
-at both 1000 pulses (one buffer) and 1,000,000 pulses (one full second).
+clearing unused fields between hops, after scaling the signal rate up to
+1,000,000 pulses/sec, and after adding the Python port. Clearing a field a
+stage already consumed and copying its value into a local variable first
+(see `spectrogram_service`/`jammer_service`/`stats_service`'s
+`last_summary` pattern, in both languages) is exactly the kind of change
+that's easy to get backwards -- clear-then-read instead of read-then-clear
+silently zeroes out the value you meant to print -- so this one got the
+same before/after diff treatment as everything else. The scale-up
+specifically was checked against `PulseSummary.mean_pri_seconds` coming
+out to exactly `0.000001` (confirming the 1,000,000-pulse/sec rate) and
+the deinterleaver's single track's `pulse_count`/`estimated_pri_seconds`
+matching `stats`' exactly, at both 1000 pulses (one buffer) and
+1,000,000 pulses (one full second) -- in all four builds. The Python port
+additionally relies on `pulsecore/iq_source.py`'s xorshift32 RNG matching
+the C++ version bit-for-bit (verified by diffing full output, not just
+summary statistics, since a subtly different RNG would still pass the
+"detected 1000000 pulses at the right rate" checks while generating
+different noise).

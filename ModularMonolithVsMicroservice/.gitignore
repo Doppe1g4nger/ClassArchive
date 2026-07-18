@@ -1,1 +1,4 @@
 build/
+python/pulsecore/pulse_pb2.py
+__pycache__/
+*.pyc
