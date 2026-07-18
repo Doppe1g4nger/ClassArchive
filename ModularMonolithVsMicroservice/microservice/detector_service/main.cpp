@@ -9,6 +9,7 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -45,6 +46,16 @@ int main(int argc, char** argv) {
   std::string payload;
   int batches_sent = 0;
 
+  // Timed region starts right after connect() succeeds -- which, thanks
+  // to this chain's reverse-order startup (see
+  // scripts/run_microservices.sh), can only happen once every downstream
+  // hop (spectrogram -> jammer -> stats -> deinterleave) is already
+  // listening. So this measurement excludes not just detector_service's
+  // own connection setup but the whole chain's, without needing to
+  // coordinate timestamps across processes. See
+  // microservice/deinterleave_service/main.cpp for the matching
+  // measurement at the other end of the pipeline.
+  const auto steady_state_start = std::chrono::steady_clock::now();
   while (source.NextBatch(frame.mutable_iq())) {
     frame.mutable_events()->Clear();
     detector.Process(frame.iq(), frame.mutable_events());
@@ -57,8 +68,12 @@ int main(int argc, char** argv) {
     }
     ++batches_sent;
   }
+  const auto steady_state_end = std::chrono::steady_clock::now();
+  const double steady_state_ms =
+      std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count();
 
   std::printf("[detector_service] streamed %d frame(s) into the chain, closing\n", batches_sent);
+  std::printf("[detector_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
   ::close(downstream_fd);
   return 0;
 }

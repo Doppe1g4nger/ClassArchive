@@ -14,6 +14,7 @@ read it, so there's no reason to pay to serialize and transmit it.
 """
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -55,11 +56,21 @@ def main() -> int:
     # the loop ends.
     last_summary = pulse_pb2.SpectrogramSummary()
     frames_forwarded = 0
+    # Set on the first successful receive, not before -- the wait for that
+    # first message is this stage's share of the chain's connection-setup
+    # latency, which we want excluded from a steady-state measurement the
+    # same way monolith_app.py excludes its imports. See
+    # detector_service.py and deinterleave_service.py for the same pattern
+    # at the other ends of the pipeline.
+    steady_state_start = None
+    steady_state_ms = 0.0
 
     while True:
         payload = framing.recv_message(upstream)
         if payload is None:
             break
+        if steady_state_start is None:
+            steady_state_start = time.perf_counter()
         frame.ParseFromString(payload)
 
         analyzer.process(frame.iq, frame.spectrogram)
@@ -78,7 +89,11 @@ def main() -> int:
             break
         frames_forwarded += 1
 
+    if steady_state_start is not None:
+        steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+
     print(f"[spectrogram_service.py] received/forwarded {frames_forwarded} frame(s) over TCP")
+    print(f"[spectrogram_service.py] STEADY_STATE_MS {steady_state_ms:.6f}")
     print(
         f"[spectrogram_service.py] {len(last_summary.max_magnitude)} bins, "
         f"{last_summary.bin_hz:.1f} Hz spacing, {last_summary.frame_count} frames"

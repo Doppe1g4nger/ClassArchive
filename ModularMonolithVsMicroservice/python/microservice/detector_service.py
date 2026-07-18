@@ -12,6 +12,7 @@ plain TCP client, streaming one serialized PipelineFrame per batch.
 """
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -48,6 +49,14 @@ def main() -> int:
     frame = pulse_pb2.PipelineFrame()
     batches_sent = 0
 
+    # Timed region starts right after connect() succeeds -- which, thanks
+    # to this chain's reverse-order startup (see
+    # scripts/run_python_microservices.sh), can only happen once every
+    # downstream hop is already listening. So this measurement excludes
+    # not just this process's own connection setup but the whole chain's.
+    # See microservice/deinterleave_service.py for the matching
+    # measurement at the other end of the pipeline.
+    steady_state_start = time.perf_counter()
     while source.next_batch(frame.iq):
         frame.events.Clear()
         detector.process(frame.iq, frame.events)
@@ -60,8 +69,10 @@ def main() -> int:
             downstream.close()
             return 1
         batches_sent += 1
+    steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
 
     print(f"[detector_service.py] streamed {batches_sent} frame(s) into the chain, closing")
+    print(f"[detector_service.py] STEADY_STATE_MS {steady_state_ms:.6f}")
     downstream.close()
     return 0
 

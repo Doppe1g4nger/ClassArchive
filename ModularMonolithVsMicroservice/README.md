@@ -141,11 +141,12 @@ python/                    Python port of the same architecture, see "Python por
 
 scripts/run_monolith.sh              Build + run the C++ monolith
 scripts/run_microservices.sh         Build + run the C++ five-service chain
-scripts/benchmark.sh                 Build + time N runs of the C++ architectures
+scripts/benchmark.sh                 Build + time N runs of the C++ architectures, wall clock (includes startup)
 scripts/gen_python_proto.sh          Regenerate python/pulsecore/pulse_pb2.py
 scripts/run_python_monolith.sh       Run the Python monolith
 scripts/run_python_microservices.sh  Run the Python five-service chain
-scripts/benchmark_python.sh          Time N runs of all four (C++/Python x monolith/microservices)
+scripts/benchmark_python.sh          Time N runs of all four, wall clock (includes startup)
+scripts/benchmark_steady_state.sh    Time N runs of all four, steady-state only (startup excluded)
 ```
 
 ## Building
@@ -748,6 +749,111 @@ this effect depend on how many CPU cores are actually available -- on a
 single-core machine neither architecture could benefit, since there'd be
 nowhere for the extra processes to run in parallel.
 
+## Steady-state benchmark
+
+Every benchmark above times each run from the *outside*: `date`/wall clock
+around process start to process exit. For the microservice chain that
+necessarily bundles in five process starts and four sequential TCP
+handshakes (see "At the smaller, one-buffer (1000-pulse) scale" above,
+point 1) alongside the actual per-batch processing work -- which is
+useful for answering "how long does it take to stand this chain up and
+run it once," but it conflates two very different costs: one-time setup
+and repeatable steady-state throughput. `scripts/benchmark_steady_state.sh`
+isolates the second one.
+
+**Methodology.** Every one of the twelve programs in this repo (six C++,
+six Python) now self-reports its own steady-state duration on a
+`STEADY_STATE_MS <value>` line, using its own local clock
+(`std::chrono::steady_clock` / `time.perf_counter()`) around only the
+batch-processing loop:
+
+- `monolith_app`/`monolith_app.py` start the timer right after `dlopen()`/
+  `import`-ing all five modules, and stop it after the last batch has been
+  processed by all five stages -- module loading and process exit are
+  excluded, but all five stages' sequential work on every batch is
+  included, since the monolith runs them one after another in a single
+  thread.
+- `detector_service`/`detector_service.py` (the chain's producer) start
+  the timer right after `connect()` to `spectrogram_service` succeeds, and
+  stop it after the last batch has been sent.
+- `deinterleave_service`/`deinterleave_service.py` (the chain's sink)
+  start the timer on their *first* successful receive and stop it on
+  their last -- i.e. the span from "the first frame reaches the end of
+  the chain" to "the last frame reaches the end of the chain."
+
+That sink-side span is the number this script actually reports for the
+microservice builds, for a reason worth spelling out: because every
+service (other than the producer) must connect downstream before it can
+accept upstream, the whole chain has to be five-deep connected before
+`detector_service`'s own `connect()` can succeed at all -- which means no
+data can reach `deinterleave_service` any earlier than that either. So the
+sink's first-recv-to-last-recv span is, by construction, exactly the
+whole pipeline's steady-state drain time, with zero cross-process
+timestamp correlation needed to prove it excludes connection setup. (The
+middle stages and `detector_service` also report their own
+`STEADY_STATE_MS`, printed to stdout/discarded by this script, for anyone
+who wants to see which single stage is the pipeline's bottleneck --
+they're just not the number the summary table below uses.)
+
+**Two different things are being measured.** The monolith number is the
+*sum* of all five stages' work on every batch, since the monolith runs
+them sequentially in one thread with no overlap between batches. The
+microservices sink number is *pipelined* throughput: five OS processes
+run concurrently, so once the pipeline is full, stage N can be working on
+batch K while stage N-1 is already producing batch K+1, and the sink's
+drain rate is bounded by whichever single stage is slowest, not by the
+sum of all five. That's not a flaw in the measurement -- it's a real
+architectural difference between the two builds, the same one a
+production pipeline would actually experience -- but it does mean this
+comparison isn't strictly "identical total work, architecture X pays more
+overhead than architecture Y." It's closer to "sequential total cost vs.
+pipelined bottleneck-bound throughput," and the microservices number can
+look better than naive intuition suggests for exactly that reason (see
+the Python results below, where it does).
+
+Run it with `./scripts/benchmark_steady_state.sh [runs] [num_pulses]`
+(defaults: 20 runs, 50,000 pulses/run = 50 batches/run). The pulse count
+matters here in a way it didn't for the wall-clock benchmarks: the sink's
+first-to-last-recv span only means something statistically if it covers
+many batches. Calibrating against the previous default of 1000 pulses (1-2
+batches) produced wildly noisy, physically implausible per-run swings --
+there just aren't enough inter-arrival gaps in the window to average over.
+50 batches/run was enough to bring run-to-run variance down to a
+reasonable range without making the Python runs (the slower side of this
+comparison) take more than about a minute and a half total.
+
+```
+Steady-state results over 20 runs, 50000 pulses/run:
+
+            C++ monolith  min=  15.910ms  median=  18.655ms  mean=  18.537ms  stdev= 0.858ms  max=  19.548ms
+       C++ microservices  min=  46.265ms  median=  56.957ms  mean=  59.076ms  stdev= 8.605ms  max=  85.664ms
+         Python monolith  min=2291.714ms  median=2420.080ms  mean=2436.328ms  stdev=97.199ms  max=2642.909ms
+    Python microservices  min=1357.845ms  median=1450.683ms  mean=1461.207ms  stdev=60.801ms  max=1604.853ms
+
+Python monolith is 131.4x the C++ monolith mean
+Python microservices is 24.7x the C++ microservices mean
+C++ microservices is 3.19x the C++ monolith mean
+Python microservices is 0.60x the Python monolith mean
+```
+
+With startup and connection setup excluded, the qualitative picture from
+the wall-clock benchmarks above holds up, and actually sharpens:
+
+- **C++ microservices still cost ~3.2x the monolith**, essentially
+  identical to the ~3.2x seen at the small wall-clock scale (see "At the
+  smaller, one-buffer (1000-pulse) scale" above) -- which says the ratio
+  measured there was never mostly a startup artifact. The per-batch
+  serialize/parse/syscall cost paid at each of the chain's four hops
+  really is the dominant term, not process-launch overhead riding along
+  with it.
+- **Python microservices still beat the Python monolith** (0.60x, i.e.
+  ~40% faster), the same GIL-driven crossover documented in "Python vs
+  C++" above -- and here it's isolated from any contribution by
+  process-startup parallelism, since none of these timers start until
+  every process is already up and connected. The five Python processes
+  genuinely pipeline CPU-bound work across cores once the chain is
+  flowing; that's a steady-state effect, not a startup one.
+
 ## Correctness
 
 Every change in this repo's history was re-verified the same way: run the
@@ -759,7 +865,10 @@ deinterleaved tracks in every case, including after adding the three new
 apps, after the spectrogram phasor-rotation fix, after converting the
 fan-out topology into a linear chain, after reordering that chain and
 clearing unused fields between hops, after scaling the signal rate up to
-1,000,000 pulses/sec, and after adding the Python port. Clearing a field a
+1,000,000 pulses/sec, after adding the Python port, and after adding the
+`STEADY_STATE_MS` instrumentation for the steady-state benchmark above
+(every program's non-timing output is unchanged; the new timer variables
+only wrap existing loops and add one new printed line each). Clearing a field a
 stage already consumed and copying its value into a local variable first
 (see `spectrogram_service`/`jammer_service`/`stats_service`'s
 `last_summary` pattern, in both languages) is exactly the kind of change

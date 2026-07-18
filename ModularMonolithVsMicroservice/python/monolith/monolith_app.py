@@ -17,6 +17,7 @@ by name, not by a runtime-supplied filesystem path.
 """
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -58,15 +59,25 @@ def main() -> int:
     frame = pulse_pb2.PipelineFrame()
     batches = 0
 
+    # Timed region starts here and covers only the batch-processing loop --
+    # imports (above) and printing the summaries (below) are deliberately
+    # excluded, so this number reflects steady-state throughput rather than
+    # one-time interpreter-startup/import cost. See
+    # microservice/deinterleave_service.py for the equivalent measurement
+    # on the chain build, and scripts/benchmark_steady_state.sh for how
+    # these numbers get compared.
+    steady_state_start = time.perf_counter()
     while source.next_batch(frame.iq):
         for stage in chain:
             stage.process(frame)
         batches += 1
+    steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
 
     print(
         f"[monolith_app.py] processed {batches} IQ batches through an imported chain "
         f"of {len(chain)} modules"
     )
+    print(f"[monolith_app.py] STEADY_STATE_MS {steady_state_ms:.6f}")
 
     spectrogram = frame.spectrogram
     print(

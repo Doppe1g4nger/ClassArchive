@@ -11,6 +11,7 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -59,7 +60,16 @@ int main(int argc, char** argv) {
   // loop ends.
   pulse::PulseSummary last_summary;
   int frames_forwarded = 0;
+  // See spectrogram_service/main.cpp for why the timer starts on the
+  // first successful receive rather than before the loop.
+  std::chrono::steady_clock::time_point steady_state_start;
+  std::chrono::steady_clock::time_point steady_state_end;
+  bool started = false;
   while (netutil::RecvMessage(upstream_fd, &payload)) {
+    if (!started) {
+      steady_state_start = std::chrono::steady_clock::now();
+      started = true;
+    }
     if (!frame.ParseFromString(payload)) {
       std::fprintf(stderr, "[stats_service] dropping malformed frame\n");
       continue;
@@ -80,8 +90,14 @@ int main(int argc, char** argv) {
     }
     ++frames_forwarded;
   }
+  steady_state_end = std::chrono::steady_clock::now();
+  const double steady_state_ms =
+      started
+          ? std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count()
+          : 0.0;
 
   std::printf("[stats_service] received/forwarded %d frame(s) over TCP\n", frames_forwarded);
+  std::printf("[stats_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
   std::printf(
       "[stats_service] pulses=%llu mean_peak=%.3f mean_dur_us=%.2f mean_pri_us=%.2f "
       "min_peak=%.3f max_peak=%.3f\n",

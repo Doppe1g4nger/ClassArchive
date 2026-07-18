@@ -8,10 +8,19 @@ sink, so it only listens for stats_service and never forwards -- it folds
 frame.events into candidate emitter tracks and prints the result once the
 upstream connection closes.
 
+As the chain's sink, this process is also where the pipeline's overall
+steady-state measurement is taken: the time from its first successful
+receive to its last is, by construction, the time it took the whole
+pipeline to drain once fully connected, with zero cross-process timestamp
+correlation required -- no data can reach this process until every
+upstream hop has finished connecting. See detector_service.py, whose own
+connect() can't succeed any earlier than that either.
+
     deinterleave_service.py [listen_port]
 """
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -39,18 +48,30 @@ def main() -> int:
     )
     frame = pulse_pb2.PipelineFrame()
     frames_received = 0
+    # See spectrogram_service.py for why the timer starts on the first
+    # successful receive rather than before the loop -- here that choice
+    # is what makes this the pipeline-wide steady-state number (see this
+    # module's docstring).
+    steady_state_start = None
+    steady_state_ms = 0.0
 
     while True:
         payload = framing.recv_message(upstream)
         if payload is None:
             break
+        if steady_state_start is None:
+            steady_state_start = time.perf_counter()
         frame.ParseFromString(payload)
         deinterleaver.process(frame.events, frame.deinterleave)
         frames_received += 1
 
+    if steady_state_start is not None:
+        steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+
     print(
         f"[deinterleave_service.py] received {frames_received} frame(s) over TCP, end of chain"
     )
+    print(f"[deinterleave_service.py] STEADY_STATE_MS {steady_state_ms:.6f}")
     print(f"[deinterleave_service.py] {len(frame.deinterleave.tracks)} track(s)")
     for track in frame.deinterleave.tracks:
         print(

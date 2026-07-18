@@ -18,6 +18,7 @@
 
 #include <dlfcn.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -89,15 +90,27 @@ int main(int argc, char** argv) {
   pulse::PipelineFrame frame;
   int batches = 0;
 
+  // Timed region starts here and covers only the batch-processing loop --
+  // module loading (dlopen()/dlsym() above) and teardown (dlclose() below)
+  // are deliberately excluded, so this number reflects steady-state
+  // throughput rather than one-time process/module-load cost. See
+  // microservice/deinterleave_service/main.cpp for the equivalent
+  // measurement on the chain build, and scripts/benchmark_steady_state.sh
+  // for how these numbers get compared.
+  const auto steady_state_start = std::chrono::steady_clock::now();
   while (source.NextBatch(frame.mutable_iq())) {
     for (LoadedModule& stage : chain) {
       stage.process(stage.instance, &frame);
     }
     ++batches;
   }
+  const auto steady_state_end = std::chrono::steady_clock::now();
+  const double steady_state_ms =
+      std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count();
 
   std::printf("[monolith_app] processed %d IQ batches through a dynamically-linked chain of %zu modules\n",
               batches, chain.size());
+  std::printf("[monolith_app] STEADY_STATE_MS %.6f\n", steady_state_ms);
 
   const pulse::SpectrogramSummary& spectrogram = frame.spectrogram();
   std::printf("[monolith_app] spectrogram: %d bins, %.1f Hz spacing, %llu frames\n",

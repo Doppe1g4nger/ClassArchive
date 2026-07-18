@@ -5,9 +5,21 @@
 // sink, so it only listens for stats_service and never forwards -- it
 // folds frame.events() into candidate emitter tracks and prints the
 // result once the upstream connection closes.
+//
+// As the chain's sink, this process is also where the pipeline's overall
+// steady-state measurement is taken: the time from its first successful
+// receive to its last is, by construction, the time it took the whole
+// pipeline to drain once fully connected, with zero cross-process
+// timestamp correlation required. That works because no data can reach
+// this process until every upstream hop (stats -> jammer -> spectrogram
+// -> detector) has finished connecting -- see detector_service/main.cpp,
+// whose own connect() can't succeed any earlier than that either. See
+// scripts/benchmark_steady_state.sh for how this number gets compared
+// against monolith_main.cpp's equivalent measurement.
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -42,7 +54,18 @@ int main(int argc, char** argv) {
   // theirs -- see pulse_detector_plugin.cpp.
   pulse::PipelineFrame frame;
   int frames_received = 0;
+  // See spectrogram_service/main.cpp for why the timer starts on the
+  // first successful receive rather than before the loop -- here that
+  // choice is what makes this the pipeline-wide steady-state number (see
+  // this file's header comment).
+  std::chrono::steady_clock::time_point steady_state_start;
+  std::chrono::steady_clock::time_point steady_state_end;
+  bool started = false;
   while (netutil::RecvMessage(upstream_fd, &payload)) {
+    if (!started) {
+      steady_state_start = std::chrono::steady_clock::now();
+      started = true;
+    }
     if (!frame.ParseFromString(payload)) {
       std::fprintf(stderr, "[deinterleave_service] dropping malformed frame\n");
       continue;
@@ -50,9 +73,15 @@ int main(int argc, char** argv) {
     deinterleaver.Process(frame.events(), frame.mutable_deinterleave());
     ++frames_received;
   }
+  steady_state_end = std::chrono::steady_clock::now();
+  const double steady_state_ms =
+      started
+          ? std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count()
+          : 0.0;
 
   std::printf("[deinterleave_service] received %d frame(s) over TCP, end of chain\n",
               frames_received);
+  std::printf("[deinterleave_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
   std::printf("[deinterleave_service] %d track(s)\n", frame.deinterleave().tracks_size());
   for (const pulse::EmitterTrack& track : frame.deinterleave().tracks()) {
     std::printf(

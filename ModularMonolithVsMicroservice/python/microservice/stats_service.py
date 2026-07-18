@@ -15,6 +15,7 @@ doesn't read it.
 """
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -54,11 +55,17 @@ def main() -> int:
     # loop ends.
     last_summary = pulse_pb2.PulseSummary()
     frames_forwarded = 0
+    # See spectrogram_service.py for why the timer starts on the first
+    # successful receive rather than before the loop.
+    steady_state_start = None
+    steady_state_ms = 0.0
 
     while True:
         payload = framing.recv_message(upstream)
         if payload is None:
             break
+        if steady_state_start is None:
+            steady_state_start = time.perf_counter()
         frame.ParseFromString(payload)
 
         accumulator.add(frame.events)
@@ -77,7 +84,11 @@ def main() -> int:
             break
         frames_forwarded += 1
 
+    if steady_state_start is not None:
+        steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+
     print(f"[stats_service.py] received/forwarded {frames_forwarded} frame(s) over TCP")
+    print(f"[stats_service.py] STEADY_STATE_MS {steady_state_ms:.6f}")
     print(
         f"[stats_service.py] pulses={last_summary.pulse_count} "
         f"mean_peak={last_summary.mean_peak_amplitude:.3f} "

@@ -17,6 +17,7 @@ of being serialized and transmitted two more times for no reason.
 """
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -59,11 +60,17 @@ def main() -> int:
     # loop ends.
     last_summary = pulse_pb2.JamSummary()
     frames_forwarded = 0
+    # See spectrogram_service.py for why the timer starts on the first
+    # successful receive rather than before the loop.
+    steady_state_start = None
+    steady_state_ms = 0.0
 
     while True:
         payload = framing.recv_message(upstream)
         if payload is None:
             break
+        if steady_state_start is None:
+            steady_state_start = time.perf_counter()
         frame.ParseFromString(payload)
 
         detector.process(frame.iq, frame.jam)
@@ -84,7 +91,11 @@ def main() -> int:
             break
         frames_forwarded += 1
 
+    if steady_state_start is not None:
+        steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+
     print(f"[jammer_service.py] received/forwarded {frames_forwarded} frame(s) over TCP")
+    print(f"[jammer_service.py] STEADY_STATE_MS {steady_state_ms:.6f}")
     print(
         f"[jammer_service.py] {last_summary.batches_flagged}/{last_summary.batches_total} "
         f"batches flagged, max_duty_cycle={last_summary.max_duty_cycle:.3f} "

@@ -10,6 +10,7 @@
 
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -58,7 +59,23 @@ int main(int argc, char** argv) {
   // N frames" reports after the loop ends.
   pulse::SpectrogramSummary last_summary;
   int frames_forwarded = 0;
+  // Set on the first successful receive, not before -- the wait for that
+  // first message is this stage's share of the chain's connection-setup
+  // latency (detector_service can only finish connecting once
+  // spectrogram_service is listening, but nothing actually flows until
+  // every downstream hop is ready too), which we want excluded from a
+  // steady-state measurement the same way monolith_main.cpp excludes
+  // dlopen(). See detector_service/main.cpp and
+  // deinterleave_service/main.cpp for the same pattern at the other ends
+  // of the pipeline.
+  std::chrono::steady_clock::time_point steady_state_start;
+  std::chrono::steady_clock::time_point steady_state_end;
+  bool started = false;
   while (netutil::RecvMessage(upstream_fd, &payload)) {
+    if (!started) {
+      steady_state_start = std::chrono::steady_clock::now();
+      started = true;
+    }
     if (!frame.ParseFromString(payload)) {
       std::fprintf(stderr, "[spectrogram_service] dropping malformed frame\n");
       continue;
@@ -78,8 +95,14 @@ int main(int argc, char** argv) {
     }
     ++frames_forwarded;
   }
+  steady_state_end = std::chrono::steady_clock::now();
+  const double steady_state_ms =
+      started
+          ? std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count()
+          : 0.0;
 
   std::printf("[spectrogram_service] received/forwarded %d frame(s) over TCP\n", frames_forwarded);
+  std::printf("[spectrogram_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
   std::printf("[spectrogram_service] %d bins, %.1f Hz spacing, %llu frames\n",
               last_summary.max_magnitude_size(), last_summary.bin_hz(),
               static_cast<unsigned long long>(last_summary.frame_count()));
