@@ -27,15 +27,26 @@ class SyntheticIQSource {
   uint64_t sample_cursor_ = 0;
   uint32_t rng_state_;
 
-  // Larger than a first-pass value (was 256): amortizes the fixed
-  // per-batch cost -- one protobuf serialize/parse, one module call or
-  // socket message -- over more samples. This helps both architectures,
-  // but disproportionately helps the microservice build since a socket
-  // round trip's fixed cost (syscalls, kernel copies) dwarfs an
-  // in-process function call's.
-  static constexpr int kBatchSize = 4096;
-  static constexpr int kGapSamples = 400;
-  static constexpr int kPulseSamples = 120;
+  // Tuned for a 1,000,000-pulse-per-second pulse train (PRF = 1 MHz) split
+  // into 1000-microsecond (1ms) buffers, which at the 10,000,000 Hz
+  // (10 MSps) sample rate every caller in this repo constructs this class
+  // with (see monolith_main.cpp / the microservice *_service mains) works
+  // out to a clean whole-sample period:
+  //   period = kGapSamples + kPulseSamples = 10 samples = 1 microsecond
+  //          -> PRF = sample_rate_hz / period = 1,000,000 pulses/sec
+  //   kBatchSize = 10,000 samples = 1000 microseconds (1ms) of signal
+  //          -> 1000 pulses per batch, exactly
+  // kPulseSamples:kGapSamples keeps roughly the original 23%-ish duty
+  // cycle (2:8 = 20%) so the jammer's duty-cycle threshold (tuned against
+  // that ratio -- see common/include/jammer.h) still doesn't misfire on
+  // ordinary pulsed traffic. Changing sample_rate_hz at a call site
+  // without changing these breaks the "exactly 1000 pulses/batch" property
+  // (it's this class's job to keep that property true only for the one
+  // sample rate documented above, not to auto-derive it from the rate
+  // actually passed in).
+  static constexpr int kBatchSize = 10000;
+  static constexpr int kGapSamples = 8;
+  static constexpr int kPulseSamples = 2;
   static constexpr double kPulseAmplitude = 10.0;
   static constexpr double kNoiseAmplitude = 0.5;
 };

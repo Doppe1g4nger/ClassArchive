@@ -61,22 +61,27 @@ LoadedModule LoadModule(const std::string& path, const char* config) {
 
 int main(int argc, char** argv) {
   const std::string plugin_dir = argc > 1 ? argv[1] : ".";
-  const int num_pulses = argc > 2 ? std::atoi(argv[2]) : 6;
+  // Default of 1000 pulses is exactly one buffer's worth at this repo's
+  // 1,000,000-pulse/sec, 1000-microsecond-buffer scale (see iq_source.h),
+  // so running with no arguments demonstrates that scale directly.
+  const int num_pulses = argc > 2 ? std::atoi(argv[2]) : 1000;
 
   // Chain order matches microservice/'s wiring exactly (see
   // scripts/run_microservices.sh): each stage needs whatever the stages
   // before it in this list have already written into the frame.
   std::vector<LoadedModule> chain = {
-      LoadModule(plugin_dir + "/libpulse_detector_plugin.so", "threshold=6.0,sample_rate=1000000"),
-      LoadModule(plugin_dir + "/libpulse_spectrogram_plugin.so", "sample_rate=1000000,num_bins=8"),
+      LoadModule(plugin_dir + "/libpulse_detector_plugin.so",
+                 "threshold=6.0,sample_rate=10000000"),
+      LoadModule(plugin_dir + "/libpulse_spectrogram_plugin.so",
+                 "sample_rate=10000000,num_bins=8"),
       LoadModule(plugin_dir + "/libpulse_jammer_plugin.so",
                  "power_threshold=20.0,duty_cycle_threshold=0.5"),
-      LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=1000000"),
+      LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=10000000"),
       LoadModule(plugin_dir + "/libpulse_deinterleaver_plugin.so",
-                 "sample_rate=1000000,pri_tolerance=0.000005"),
+                 "sample_rate=10000000,pri_tolerance=0.0000001"),
   };
 
-  pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/1000000.0, num_pulses);
+  pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/10000000.0, num_pulses);
   // Reused across iterations for the same reason common/ loops reuse
   // their message objects -- see pulse_detector_plugin.cpp's history.
   // frame.iq() is filled directly by NextBatch() below (no copy); every

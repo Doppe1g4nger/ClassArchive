@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
   const uint16_t listen_port = argc > 1 ? static_cast<uint16_t>(std::atoi(argv[1])) : 50054;
   const std::string next_host = argc > 2 ? argv[2] : "127.0.0.1";
   const uint16_t next_port = argc > 3 ? static_cast<uint16_t>(std::atoi(argv[3])) : 50055;
-  constexpr double kSampleRateHz = 1000000.0;
+  constexpr double kSampleRateHz = 10000000.0;
 
   std::printf("[stats_service] connecting to deinterleave_service at %s:%u\n", next_host.c_str(),
               next_port);

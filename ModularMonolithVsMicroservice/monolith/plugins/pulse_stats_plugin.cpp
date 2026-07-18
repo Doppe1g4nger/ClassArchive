@@ -20,7 +20,7 @@ struct StatsModule {
 extern "C" {
 
 pulse_module_t pulse_module_create(const char* config) {
-  double sample_rate_hz = 1000000.0;
+  double sample_rate_hz = 10000000.0;
   if (config != nullptr) {
     std::sscanf(config, "sample_rate=%lf", &sample_rate_hz);
   }

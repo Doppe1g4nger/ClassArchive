@@ -18,8 +18,8 @@
 
 int main(int argc, char** argv) {
   const uint16_t listen_port = argc > 1 ? static_cast<uint16_t>(std::atoi(argv[1])) : 50055;
-  constexpr double kSampleRateHz = 1000000.0;
-  constexpr double kPriToleranceSeconds = 5e-6;
+  constexpr double kSampleRateHz = 10000000.0;
+  constexpr double kPriToleranceSeconds = 1e-7;
 
   const int listen_fd = netutil::Listen(listen_port);
   if (listen_fd < 0) {

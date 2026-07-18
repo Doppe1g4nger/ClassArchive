@@ -32,6 +32,19 @@ through hops that never touch it — see "Optimizations" below. Small enough
 to read start to finish, but with enough sequential stages to show what
 "insert a module into the pipeline" costs in each architecture.
 
+**Scale:** the synthetic signal is 1,000,000 pulses per second (a pulse
+every microsecond) split into 1000-microsecond (1ms) buffers, so every
+buffer carries exactly 1000 pulses. That comes from a 10,000,000 Hz
+(10 MSps) sample rate with a 10-sample pulse period (2 samples pulse, 8
+samples gap — see `common/include/iq_source.h`, which documents why those
+specific constants are the ones that make the arithmetic come out exact).
+`./build/bin/monolith_app ./build/bin` with no other arguments generates
+exactly one buffer (1000 pulses) by default; passing `1000000` generates a
+full second's worth (1000 buffers). `PulseSummary.mean_pri_seconds` is a
+good sanity check that the scale is configured correctly: it should always
+come out to `0.000001` (1 microsecond), matching 1,000,000 pulses/sec
+exactly.
+
 ## The point of the example
 
 Both variants are built from the **exact same business logic** and the
@@ -149,7 +162,8 @@ This produces, all in `build/bin/`:
 ./scripts/run_monolith.sh
 # or directly:
 ./build/bin/monolith_app <plugin_dir> [num_pulses]
-./build/bin/monolith_app ./build/bin 1000
+./build/bin/monolith_app ./build/bin 1000        # one buffer (the default)
+./build/bin/monolith_app ./build/bin 1000000     # one full second at 1,000,000 pulses/sec
 ```
 
 **Microservices** (five processes chained over TCP: `detector_service ->
@@ -177,7 +191,8 @@ bottom-to-top.
 ./build/bin/stats_service 20053 127.0.0.1 20054
 ./build/bin/jammer_service 20052 127.0.0.1 20053
 ./build/bin/spectrogram_service 20051 127.0.0.1 20052
-./build/bin/detector_service 127.0.0.1 20051 1000
+./build/bin/detector_service 127.0.0.1 20051 1000        # one buffer (the default)
+./build/bin/detector_service 127.0.0.1 20051 1000000     # one full second at 1,000,000 pulses/sec
 ```
 
 (Ports default to the 20000s rather than the more obvious 50000s because
@@ -190,12 +205,13 @@ explicit ports below the ephemeral range sidesteps that entirely.)
 
 Both print the same detected pulse count, summary statistics, spectrum,
 jam-detection state, and emitter tracks, computed from the same synthetic
-IQ data (`num_pulses` rectangular pulses buried in noise, 6 by default) —
-that's the point: it's the same result, produced two structurally
-different ways. As a built-in consistency check: since the synthetic
-source only ever emits one emitter's worth of pulses, the deinterleaver
-should always converge to exactly one track whose `estimated_pri_us` and
-`pulses` match `stats`' `mean_pri_us` and `pulses` exactly.
+IQ data (`num_pulses` rectangular pulses buried in noise, 1000 by default
+— one full buffer at this repo's scale) — that's the point: it's the same
+result, produced two structurally different ways. As a built-in
+consistency check: since the synthetic source only ever emits one
+emitter's worth of pulses, the deinterleaver should always converge to
+exactly one track whose `estimated_pri_us` and `pulses` match `stats`'
+`mean_pri_us` and `pulses` exactly.
 
 ## The three new apps
 
@@ -213,8 +229,9 @@ should always converge to exactly one track whose `estimated_pri_us` and
   wideband/barrage jamming as opposed to normal narrow pulses. The default
   thresholds (`power_threshold=20.0,duty_cycle_threshold=0.5`) are set
   well above this repo's synthetic pulse train's actual duty cycle
-  (~23%, since 120 of every 520 samples are "in pulse") specifically so
-  the demo shows `0/N batches flagged` — proof the detector isn't just
+  (20%, since 2 of every 10 samples per pulse period are "in pulse" --
+  see "Scale" near the top of this document) specifically so the demo
+  shows `0/N batches flagged` — proof the detector isn't just
   crying wolf on ordinary pulsed traffic, since a real jamming signature
   should look like continuous elevated energy, not a normal periodic pulse
   train.
@@ -348,38 +365,48 @@ Two changes fixed this:
    for `iq`, since it's read by three stages spread across the chain, but
    each summary is written and consumed by exactly one.
 
-The effect is concrete and measurable: a `pulse::IQBatch` for one
-4096-sample batch serializes to about 94,087 bytes; a `PulseEventBatch`
-for the same batch, about 245 bytes. Before this fix, all four hops
-carried something close to the full ~94KB frame. After it, only the first
-two hops (`detector->spectrogram`, `spectrogram->jammer`) do — the last
-two hops (`jammer->stats`, `stats->deinterleave`) carry only `events`, at
-roughly 248 bytes. Over a full 1000-pulse run (128 batches), that's about
-24MB of raw samples no longer serialized, transmitted, and parsed on hops
-that never needed them.
+The effect is concrete and measurable. At this repo's current scale (see
+"Scale" near the top of this document — 10,000 samples/batch, 1000 pulses
+per batch), a `pulse::IQBatch` for one batch serializes to about 264,828
+bytes when bundled with its batch's `PulseEventBatch` (~34,941 bytes on
+its own — at 1000 pulses/batch nearly every pulse produces a detected
+event, so `events` is a real fraction of the frame here, not the ~0.3%
+of it it was at the smaller pulse rate this fix was first measured
+against). Before this fix, all four hops carried something close to the
+full ~265KB frame. After it, only the first two hops
+(`detector->spectrogram`, `spectrogram->jammer`) do — the last two hops
+(`jammer->stats`, `stats->deinterleave`) carry only `events`, at roughly
+35KB (about 13% of the unstripped size). Over a full 1,000,000-pulse
+(1-second) run, that's about 460MB of raw samples no longer serialized,
+transmitted, and parsed on hops that never needed them.
 
 That's a large reduction in bytes moved, but a much smaller reduction in
 wall-clock time (see "Benchmark" below) — on a loopback socket, bandwidth
 is nowhere near the bottleneck; the fixed per-message cost (syscalls,
 buffer allocation, protobuf parse/serialize overhead per field) dominates
-far more than the marginal cost of a few more kilobytes per message does.
-This optimization would matter far more on a real network between real
-hosts, where bandwidth and per-byte latency are actually scarce — which
-is itself worth noting as a general lesson: "avoid sending unnecessary
-data" pays off in proportion to how expensive bytes actually are on the
-wire you're using, and loopback is about as cheap as wires get.
+far more than the marginal cost of extra kilobytes per message does. This
+optimization would matter far more on a real network between real hosts,
+where bandwidth and per-byte latency are actually scarce — which is
+itself worth noting as a general lesson: "avoid sending unnecessary data"
+pays off in proportion to how expensive bytes actually are on the wire
+you're using, and loopback is about as cheap as wires get.
 
 ### Everything else
 
 Both architectures also share a few more ordinary tuning passes:
 
 - **Bigger batches.** `SyntheticIQSource`'s batch size went from 256 to
-  4096 samples (`common/include/iq_source.h`). Every batch costs one fixed
-  overhead — a protobuf serialize/parse, one module call or one socket
-  message — so processing the same amount of data in fewer, larger batches
-  amortizes that fixed cost over more work. This helps the monolith some
-  and the microservices a lot, since a socket round trip's fixed cost
-  (syscalls, kernel copies) is much larger than an in-process call's.
+  4096 samples (`common/include/iq_source.h`), for the reason below, then
+  later to today's 10,000 samples/batch (1000 microseconds/buffer) when
+  the signal rate was scaled up to 1,000,000 pulses/sec (see "Scale" near
+  the top of this document) -- that later change was driven by the target
+  buffer duration, not by this optimization, but it keeps the same
+  benefit. Every batch costs one fixed overhead — a protobuf
+  serialize/parse, one module call or one socket message — so processing
+  the same amount of data in fewer, larger batches amortizes that fixed
+  cost over more work. This helps the monolith some and the microservices
+  a lot, since a socket round trip's fixed cost (syscalls, kernel copies)
+  is much larger than an in-process call's.
 - **Reused protobuf message objects.** Every hot loop (`monolith_main.cpp`,
   every plugin, every microservice `main.cpp`) used to declare a fresh
   message as a local inside the loop body.
@@ -403,24 +430,54 @@ Both architectures also share a few more ordinary tuning passes:
 
 None of this changes behavior — see "Correctness" below.
 
-## Benchmark: 50 runs, 1000 pulses
+## Benchmark: 50 runs, 1,000,000 pulses (1 second at the current scale)
 
 `scripts/benchmark.sh` builds both architectures, then times 50
-independent, fresh-process runs of each against a synthetic 1000-pulse
-input (`./scripts/benchmark.sh 50 1000`). Each run is timed end to end:
-process start to process exit for `monolith_app`; for the microservice
-chain, from *before* `deinterleave_service` (the first process started,
-since startup runs in reverse of data-flow order) is even launched to
-after all five processes have exited, so process-startup and
-connection-setup cost is counted symmetrically on both sides.
+independent, fresh-process runs of each against a synthetic input
+(`./scripts/benchmark.sh 50 1000000`, which is also the default -- one
+full second at this repo's 1,000,000-pulse/sec, 1000-pulses/buffer scale,
+i.e. 1000 buffers per run). Each run is timed end to end: process start
+to process exit for `monolith_app`; for the microservice chain, from
+*before* `deinterleave_service` (the first process started, since startup
+runs in reverse of data-flow order) is even launched to after all five
+processes have exited, so process-startup and connection-setup cost is
+counted symmetrically on both sides.
 
-Representative result after reordering the chain and clearing unused
-fields (this machine, two separate 50-run measurements landed in the same
-range):
+Representative result (this machine, two separate 50-run measurements
+landed in the same range):
 
 ```
-Results over 50 runs, 1000 pulses/run:
+Results over 50 runs, 1000000 pulses/run:
 
+            modular monolith  min=438.7ms  median=445.7ms  mean=447.6ms  stdev=7-9ms  max=477-492ms
+               microservices  min=1223ms   median=1263ms   mean=1269-1276ms  stdev=35-44ms  max=1352-1499ms
+
+microservices mean is ~2.83-2.85x the modular monolith mean
+```
+
+That ratio is narrower than the ~3.2x measured at the smaller, 1000-pulse
+(one-buffer) scale below -- because the fixed costs that dominate a
+single small run (process startup, sequential connection setup) stay
+roughly constant while the actual work (1000 buffers instead of 1-2)
+scales up, so at a full second's worth of data the fixed costs matter
+proportionally less and the comparison converges toward whatever the
+steady-state per-batch cost ratio between the two architectures actually
+is. Neither number is "more correct" -- they're testing different things:
+the small-scale numbers isolate startup/connection overhead, the
+full-second numbers show what the architectural choice costs once that
+overhead is amortized.
+
+### At the smaller, one-buffer (1000-pulse) scale
+
+This repeats the same benchmark at `./scripts/benchmark.sh 50 1000`
+(1000 pulses = one buffer, no batching-across-buffers involved) for
+comparison against the history below, which was all measured at small
+scale before this repo's signal rate was scaled up to 1,000,000
+pulses/sec (see "Scale" earlier in this document) -- so these are the
+current code's numbers at the *same* scale the older entries used, not a
+mix of old code and new scale:
+
+```
             modular monolith  min=26.6ms  median=27.0ms  mean=27.3ms  stdev=0.7ms  max=31.3ms
                microservices  min=81.5ms  median=85.9ms  mean=87.5ms  stdev=6.8ms  max=122.1ms
 
@@ -433,8 +490,8 @@ previous section shows this avoids moving. That's expected, not a sign
 the fix didn't work (correctness was reverified identically — see below):
 on a loopback socket, moving an extra few hundred KB across two hops costs
 low-single-digit milliseconds at most, so it was never going to be the
-dominant cost. What still dominates the microservice build's time,
-unchanged by this fix:
+dominant cost. What still dominates the microservice build's time at this
+scale, unchanged by that fix:
 
 1. **Sequential connection setup instead of parallel.** Each service's
    downstream connection depends on the *previous* service already being
@@ -456,6 +513,15 @@ either all succeed instantly or don't, and passing `frame` by reference
 between chain stages costs nothing extra no matter how many fields ride
 along unused — which is exactly why "avoid sending unnecessary data" is a
 microservices-specific optimization in this repo, not a general one.
+
+The four entries below predate this repo's scale-up to 1,000,000
+pulses/sec (see "Scale" near the top of this document) and were all
+measured against the *old* generator constants -- a 1,000,000 Hz sample
+rate, 520-sample pulse periods, 4096-sample batches -- which no longer
+exist in the code. They're kept as a historical record of each fix's own
+effect at whatever scale existed when it was made, not as a byte-for-byte
+comparable baseline against the "one-buffer" entry above them (which runs
+*current* code, just at a small `num_pulses`).
 
 **Before this optimization**, with the same chain topology but every hop
 forwarding the full frame regardless of what the next stage read, the
@@ -495,23 +561,33 @@ above) removed that unnecessary cost and restored the expected ordering.
 
 Small workloads still favor the monolith even more heavily than any of
 this — run `./scripts/benchmark.sh 20 0` (0 pulses, i.e. one nearly-empty
-batch) and the monolith wins by roughly 2x, since starting one process
-beats starting five processes plus four sequential TCP handshakes
-regardless of how much data ends up moving once they're up.
+buffer) against *current* code and the monolith wins by roughly 5x
+(~4.3ms vs ~22.8ms), since starting one process beats starting five
+processes plus four sequential TCP handshakes regardless of how much data
+ends up moving once they're up. That gap is wider than the fan-out-era
+~2x this same test used to show, because a chain's connection setup is
+inherently sequential (see point 1 above) while fan-out's was parallel --
+so a chain pays more fixed startup cost precisely when there's the least
+actual work to amortize it against.
 
 ### Correctness
 
 Every change in this repo's history was re-verified the same way: run
-both binaries at 6 pulses (the original default) and 1000 pulses and diff
-the printed output. The monolith and microservice builds have produced
+both binaries at a small pulse count and a larger one and diff the
+printed output. The monolith and microservice builds have produced
 byte-identical summary statistics, spectrogram bins, jam-detection state,
 and deinterleaved tracks in every case, including after adding the three
 new apps, after the spectrogram phasor-rotation fix, after converting the
-fan-out topology into a linear chain, and after reordering that chain and
-clearing unused fields between hops. Clearing a field a stage already
-consumed and copying its value into a local variable first (see
+fan-out topology into a linear chain, after reordering that chain and
+clearing unused fields between hops, and after scaling the signal rate up
+to 1,000,000 pulses/sec. Clearing a field a stage already consumed and
+copying its value into a local variable first (see
 `spectrogram_service`/`jammer_service`/`stats_service`'s `last_summary`
 pattern) is exactly the kind of change that's easy to get backwards --
 clear-then-read instead of read-then-clear silently zeroes out the value
 you meant to print -- so this one got the same before/after diff
-treatment as everything else.
+treatment as everything else. The scale-up specifically was checked
+against `PulseSummary.mean_pri_seconds` coming out to exactly `0.000001`
+(confirming the 1,000,000-pulse/sec rate) and the deinterleaver's single
+track's `pulse_count`/`estimated_pri_seconds` matching `stats`' exactly,
+at both 1000 pulses (one buffer) and 1,000,000 pulses (one full second).

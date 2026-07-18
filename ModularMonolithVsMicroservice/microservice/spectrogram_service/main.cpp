@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
   const uint16_t listen_port = argc > 1 ? static_cast<uint16_t>(std::atoi(argv[1])) : 50052;
   const std::string next_host = argc > 2 ? argv[2] : "127.0.0.1";
   const uint16_t next_port = argc > 3 ? static_cast<uint16_t>(std::atoi(argv[3])) : 50053;
-  constexpr double kSampleRateHz = 1000000.0;
+  constexpr double kSampleRateHz = 10000000.0;
   constexpr int kNumBins = 8;
 
   std::printf("[spectrogram_service] connecting to jammer_service at %s:%u\n", next_host.c_str(),

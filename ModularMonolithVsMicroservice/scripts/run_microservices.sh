@@ -26,8 +26,11 @@ cmake --build build -j"$(nproc)" >/dev/null
 # service in this chain also makes outbound connections, which get
 # assigned ephemeral source ports by the OS, and a listener bound inside
 # that range can randomly lose a bind() race against one of those.
+# Default of 1000 pulses is exactly one buffer's worth at this repo's
+# 1,000,000-pulse/sec, 1000-microsecond-buffer scale (see
+# common/include/iq_source.h).
 BASE_PORT="${1:-20051}"
-NUM_PULSES="${2:-6}"
+NUM_PULSES="${2:-1000}"
 
 # Chain order (data flow): spectrogram=+0, jammer=+1, stats=+2, deinterleave=+3.
 PORT_SPECTROGRAM=$((BASE_PORT))

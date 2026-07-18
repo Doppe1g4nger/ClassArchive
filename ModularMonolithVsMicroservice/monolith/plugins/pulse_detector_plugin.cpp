@@ -24,9 +24,9 @@ extern "C" {
 
 pulse_module_t pulse_module_create(const char* config) {
   double threshold = 6.0;
-  double sample_rate_hz = 1000000.0;
+  double sample_rate_hz = 10000000.0;
   if (config != nullptr) {
-    // Deliberately minimal config format ("threshold=6.0,sample_rate=1e6")
+    // Deliberately minimal config format ("threshold=6.0,sample_rate=1e7")
     // to avoid pulling in a JSON dependency for a two-field config.
     std::sscanf(config, "threshold=%lf,sample_rate=%lf", &threshold, &sample_rate_hz);
   }

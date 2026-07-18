@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Times 50 runs of each architecture against a 1000-pulse synthetic input
-# and reports min/median/mean/max wall-clock time per run.
+# Times 50 runs of each architecture against a synthetic input and reports
+# min/median/mean/max wall-clock time per run. Default of 1,000,000 pulses
+# is exactly one second of this repo's 1,000,000-pulse/sec, 1000-microsecond
+# (1000 pulses/buffer) signal -- see common/include/iq_source.h.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUNS="${1:-50}"
-NUM_PULSES="${2:-1000}"
+NUM_PULSES="${2:-1000000}"
 # Default kept below the kernel's ephemeral port range (usually
 # 32768-60999, check /proc/sys/net/ipv4/ip_local_port_range) -- every
 # service in the microservice chain also makes outbound connections,
