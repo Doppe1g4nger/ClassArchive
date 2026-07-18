@@ -21,17 +21,24 @@ boundary between the "detector" module and the "stats" module changes:
 |---|---|---|
 | Process model | 1 process | 2 processes |
 | Module loading | `dlopen()` at startup | separate binaries, started independently |
-| Module boundary | C ABI function call (`module_api.h`) | TCP socket |
-| Data crossing the boundary | serialized `pulse.PulseEventBatch` bytes, passed as a pointer + length | serialized `pulse.PulseEventBatch` bytes, length-prefixed on the wire |
+| Module boundary | typed C++ reference (`module_api.h`) | TCP socket |
+| Data crossing the boundary | a `pulse::IQBatch&` / `pulse::PulseEventBatch&`, in place, no copy | serialized `pulse.PulseEventBatch` bytes, length-prefixed on the wire |
 | Failure domain | one module crashing takes down the process | one service crashing is isolated, visible as a dropped connection |
 | Deployment | ship one executable + two `.so` files, versioned together | ship/scale/deploy each service independently |
 
-The `pulse.PulseEventBatch` protobuf message is what proves the point: it's
-the same bytes either way. Swapping `dlopen()` + a function call for
-`connect()` + `send()` is the *entire* difference between the two
-architectures here — the detection and statistics algorithms
-(`common/src/pulse_detector.cpp`, `common/src/pulse_stats.cpp`) don't know
-or care which one is in use.
+The `pulse.*` protobuf schema is what proves the point: it's the same
+message *types* either way, defined once in `proto/pulse.proto` and used by
+every module. What differs is what those types have to go through to cross
+each architecture's module boundary. `monolith_app`'s modules run in the
+same process and, as of this build, share one loaded copy of the generated
+protobuf code (see the shared `pulse_proto` library below), so they pass
+`pulse::IQBatch`/`pulse::PulseEventBatch` objects by reference — no
+serialize, no parse. `detector_service` and `stats_service` are separate
+processes with separate address spaces; there is no way to hand one a
+pointer into the other's memory, so they *must* serialize onto the socket.
+That's not an implementation gap in this demo, it's the actual, unavoidable
+cost of a real process boundary — which is exactly the trade-off this
+example exists to make visible.
 
 ## Layout
 
@@ -45,7 +52,7 @@ common/                    Architecture-agnostic core ("pulsecore")
   src/...
 
 monolith/                  Modular monolith build
-  include/module_api.h       C ABI every plugin module exports (create/process/destroy)
+  include/module_api.h       Typed dlsym()-able ABI every plugin module exports (create/process/destroy)
   plugins/
     pulse_detector_plugin.cpp  -> libpulse_detector_plugin.so
     pulse_stats_plugin.cpp     -> libpulse_stats_plugin.so
@@ -129,9 +136,47 @@ This is a real constraint of building modular-monolith-style plugin systems
 in C++ with protobuf, not an artifact of the demo, so it's left in as-is
 rather than hidden.
 
+That fix turned out to pay for itself twice over. Having exactly one
+loaded definition of `pulse::IQBatch` and friends isn't just what avoids
+the duplicate-registration crash — it's also the precondition for what
+`module_api.h` does now: pass `pulse::` messages across the `dlopen()`
+boundary by reference instead of by serialized bytes (see "Eliminating the
+monolith's serialization tax" below). Without a single shared
+`pulse_proto`, each plugin would carry its own copy of those types with
+its own vtable layout, and passing a reference across the boundary would
+be undefined behavior instead of just safe.
+
 ## Optimizations
 
-Both architectures share the same handful of obvious tuning passes:
+### Eliminating the monolith's serialization tax
+
+The first pass at this repo made `module_api.h` byte-oriented on purpose —
+modules took `const uint8_t*`/length and returned a heap-allocated
+`uint8_t*`/length, mirroring the microservices' wire format so the same
+`PulseEventBatch` bytes visibly crossed both kinds of boundary. That
+looked symmetric, but it forced `monolith_app` to `SerializeToString()`
+every `IQBatch` (the largest message in the pipeline, 4096 samples/batch)
+just to hand it to the detector plugin, which immediately `ParseFromArray`'d
+it back — a real cost paid for a boundary that doesn't need it, since host
+and plugin share one address space.
+
+The fix: `module_api.h`'s function-pointer types now take/return
+`pulse::IQBatch&`, `pulse::PulseEventBatch&`, and `pulse::PulseSummary*`
+directly (see the header for the full rationale). `monolith_main.cpp` no
+longer serializes anything in its per-batch loop; `pulse_detector_plugin.cpp`
+and `pulse_stats_plugin.cpp` no longer parse or allocate an output buffer.
+This only works safely because of the `pulse_proto` shared-library fix
+above — every module has the *same* definition of every `pulse::` type, so
+passing them by reference across `dlopen()` is well-defined. The
+microservices can't take this shortcut: `detector_service` and
+`stats_service` are separate processes, so `PulseEventBatch` genuinely has
+to be serialized to cross that boundary. That asymmetry — not an
+implementation gap — is now the actual difference the benchmark below
+measures.
+
+### Everything else
+
+Both architectures also share a few more ordinary tuning passes:
 
 - **Bigger batches.** `SyntheticIQSource`'s batch size went from 256 to
   4096 samples (`common/include/iq_source.h`). Every batch costs one fixed
@@ -173,56 +218,42 @@ pair, from *before* `stats_service` is even launched to after both
 processes have exited, so process-startup cost is counted symmetrically
 on both sides.
 
-Representative result (this machine, three separate 50-run measurements
-all landed in the same range):
+Representative result (this machine, current build — modules pass typed
+references, no serialization inside `monolith_app`):
 
 ```
 Results over 50 runs, 1000 pulses/run:
 
-            modular monolith  min=24.5ms  median=25.6ms  mean=26.7ms  stdev=4.7ms  max=50.9ms
-               microservices  min=18.1ms  median=19.3ms  mean=19.6ms  stdev=1.0ms  max=23.3ms
+            modular monolith  min=10.8ms  median=11.7ms  mean=12.1ms  stdev=1.4ms  max=17.0ms
+               microservices  min=18.5ms  median=20.1ms  mean=20.1ms  stdev=0.8ms  max=22.8ms
 
-microservices mean is ~0.75x the modular monolith mean
+microservices mean is ~1.7x the modular monolith mean
 ```
 
-**The microservices come out faster here, which is the opposite of the
-naive intuition** ("function call must beat a socket round trip"). It's
-real and reproducible, and the reason is a genuine architectural insight,
-not a benchmarking artifact:
+This matches intuition now: the monolith, doing real work through plain
+function calls with no serialization, is roughly 40% faster than two
+processes serializing `PulseEventBatch` over a loopback TCP socket.
 
-`module_api.h` deliberately makes the monolith's plugin boundary
-byte-oriented — the same wire format the microservices use — so the demo
-can show the same `PulseEventBatch` bytes crossing both kinds of boundary.
-That means `monolith_app` pays to **serialize the raw `IQBatch` and
-deserialize it again** just to hand it across the `dlopen()` boundary into
-the detector plugin, even though host and plugin share one address space
-and, in a less symmetry-obsessed design, could just pass a pointer.
-`IQBatch` (4096 samples/batch) is the largest message in this pipeline by
-far — much bigger than the `PulseEventBatch` it produces (a handful of
-detected pulses per batch). `detector_service`, by contrast, calls
-`PulseDetector::Process()` directly on the in-memory `IQBatch` with no
-serialization at all, and only serializes the much smaller
-`PulseEventBatch` for the network hop. So per batch, the monolith does
-strictly more (de)serialization work than the microservices do, and at
-1000 pulses that cost outweighs the microservices' extra process and
-socket overhead.
+That gap is even more pronounced when there's barely any work to amortize
+process-startup cost against — run `./scripts/benchmark.sh 20 0` (0
+pulses, i.e. one nearly-empty batch) and the monolith wins by roughly 2x
+(~4.8ms vs ~9.8ms), since a single process start beats two process starts
+plus a TCP handshake regardless of how the modules talk once they're up.
 
-That overhead is real too, and dominates at small workloads: run the same
-benchmark with `num_pulses=0` (`./scripts/benchmark.sh 20 0`) and the
-monolith wins by roughly 2x (~5.5ms vs ~10.5ms), because there's almost no
-detection work to amortize the cost of starting a second process and
-setting up a TCP connection. The crossover — where the monolith's
-per-batch serialization tax overtakes the microservices' fixed process/IPC
-tax — happens somewhere between those two workloads.
-
-The honest takeaway: this particular monolith's plugin ABI accepted a
-real serialization cost in exchange for looking structurally identical to
-the microservice wire boundary, which is what makes the two architectures
-directly comparable in the first place. A production modular monolith
-that let modules share C++ types instead of only bytes wouldn't pay that
-tax and would very likely win the 1000-pulse case — but it would also lose
-the property that makes this repo's comparison legible: that the *same
-bytes* cross both kinds of boundary.
+**This wasn't always the result.** An earlier version of `module_api.h`
+made the monolith's modules speak bytes instead of typed references, on
+the theory that it would make the two architectures more directly
+comparable — same `PulseEventBatch` bytes crossing both kinds of boundary.
+At the same 1000-pulse workload, that version's monolith actually lost to
+the microservices (mean ~26.7ms vs ~19.6ms, i.e. microservices ~25%
+*faster*), because forcing the monolith to serialize/deserialize every
+`IQBatch` just to hand it across an in-process `dlopen()` boundary cost
+more than the microservices' extra process and socket overhead did at that
+batch size. Passing typed references instead (see "Eliminating the
+monolith's serialization tax" above) removed that unnecessary cost and
+restored the expected ordering — proof that the earlier byte-oriented
+design was measuring an artifact of its own ABI choice, not something
+inherent to modular monoliths.
 
 ### Correctness
 

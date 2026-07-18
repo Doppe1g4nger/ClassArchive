@@ -1,10 +1,12 @@
 // monolith_app: a single process/executable that dlopen()s both the
 // pulse-detector and pulse-stats modules at startup and wires the
-// detector's protobuf output directly into the stats module's input via
-// plain function calls. No sockets, no serialization framing -- just
-// bytes handed across a dlopen() boundary. Compare with
-// microservice/{detector_service,stats_service} which run the identical
-// core algorithms as two separate processes talking protobuf over TCP.
+// detector's output directly into the stats module's input as a plain
+// C++ reference -- no serialization, since both modules are built from
+// the same pulse.pb.h/pulse_proto as the host (see module_api.h for why
+// that makes it safe). Compare with
+// microservice/{detector_service,stats_service}, which run the identical
+// core algorithms as two separate processes that must serialize onto a
+// TCP socket because they don't share an address space.
 
 #include <dlfcn.h>
 
@@ -18,17 +20,22 @@
 
 namespace {
 
+// ProcessFn differs between the detector and stats modules (they consume
+// and produce different message types), so this is templated on it
+// rather than sharing one non-generic struct/loader between the two.
+template <typename ProcessFn>
 struct LoadedModule {
   void* handle = nullptr;
   pulse_module_create_fn create = nullptr;
   pulse_module_destroy_fn destroy = nullptr;
-  pulse_module_process_fn process = nullptr;
-  pulse_module_free_buffer_fn free_buffer = nullptr;
+  ProcessFn process = nullptr;
   pulse_module_t instance = nullptr;
 };
 
-LoadedModule LoadModule(const std::string& path, const char* config) {
-  LoadedModule m;
+template <typename ProcessFn>
+LoadedModule<ProcessFn> LoadModule(const std::string& path, const char* process_symbol,
+                                    const char* config) {
+  LoadedModule<ProcessFn> m;
   m.handle = dlopen(path.c_str(), RTLD_NOW);
   if (m.handle == nullptr) {
     std::fprintf(stderr, "[monolith_app] dlopen(%s) failed: %s\n", path.c_str(), dlerror());
@@ -37,11 +44,8 @@ LoadedModule LoadModule(const std::string& path, const char* config) {
 
   m.create = reinterpret_cast<pulse_module_create_fn>(dlsym(m.handle, PULSE_MODULE_CREATE_SYM));
   m.destroy = reinterpret_cast<pulse_module_destroy_fn>(dlsym(m.handle, PULSE_MODULE_DESTROY_SYM));
-  m.process = reinterpret_cast<pulse_module_process_fn>(dlsym(m.handle, PULSE_MODULE_PROCESS_SYM));
-  m.free_buffer =
-      reinterpret_cast<pulse_module_free_buffer_fn>(dlsym(m.handle, PULSE_MODULE_FREE_BUFFER_SYM));
-  if (m.create == nullptr || m.destroy == nullptr || m.process == nullptr ||
-      m.free_buffer == nullptr) {
+  m.process = reinterpret_cast<ProcessFn>(dlsym(m.handle, process_symbol));
+  if (m.create == nullptr || m.destroy == nullptr || m.process == nullptr) {
     std::fprintf(stderr, "[monolith_app] %s is missing a required symbol\n", path.c_str());
     std::exit(1);
   }
@@ -57,43 +61,26 @@ int main(int argc, char** argv) {
   const std::string plugin_dir = argc > 1 ? argv[1] : ".";
   const int num_pulses = argc > 2 ? std::atoi(argv[2]) : 6;
 
-  LoadedModule detector =
-      LoadModule(plugin_dir + "/libpulse_detector_plugin.so", "threshold=6.0,sample_rate=1000000");
-  LoadedModule stats = LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=1000000");
+  LoadedModule<pulse_detector_process_fn> detector =
+      LoadModule<pulse_detector_process_fn>(plugin_dir + "/libpulse_detector_plugin.so",
+                                             PULSE_DETECTOR_PROCESS_SYM,
+                                             "threshold=6.0,sample_rate=1000000");
+  LoadedModule<pulse_stats_process_fn> stats = LoadModule<pulse_stats_process_fn>(
+      plugin_dir + "/libpulse_stats_plugin.so", PULSE_STATS_PROCESS_SYM, "sample_rate=1000000");
 
   pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/1000000.0, num_pulses);
   pulse::IQBatch iq_batch;
+  // Reused across iterations for the same reason common/ loops reuse
+  // their message objects -- see pulse_detector_plugin.cpp's history.
+  pulse::PulseEventBatch events;
   pulse::PulseSummary last_summary;
   int batches = 0;
 
-  // Reused across iterations rather than declared inside the loop: a
-  // std::string retains its allocated capacity across clear()/assign, so
-  // this turns "reallocate every batch" into "reallocate once, memcpy
-  // after that."
-  std::string in_bytes;
-
   while (source.NextBatch(&iq_batch)) {
-    iq_batch.SerializeToString(&in_bytes);
-
-    uint8_t* det_out = nullptr;
-    uint32_t det_out_len = 0;
-    if (detector.process(detector.instance, reinterpret_cast<const uint8_t*>(in_bytes.data()),
-                          static_cast<uint32_t>(in_bytes.size()), &det_out, &det_out_len) != 0) {
-      std::fprintf(stderr, "[monolith_app] detector module failed\n");
-      return 1;
-    }
-
-    uint8_t* stats_out = nullptr;
-    uint32_t stats_out_len = 0;
-    const int rc = stats.process(stats.instance, det_out, det_out_len, &stats_out, &stats_out_len);
-    detector.free_buffer(det_out);
-    if (rc != 0) {
-      std::fprintf(stderr, "[monolith_app] stats module failed\n");
-      return 1;
-    }
-
-    last_summary.ParseFromArray(stats_out, static_cast<int>(stats_out_len));
-    stats.free_buffer(stats_out);
+    // Straight in-process calls: iq_batch and events are passed by
+    // reference into the dlopen()'d modules and read/written in place.
+    detector.process(detector.instance, iq_batch, &events);
+    stats.process(stats.instance, events, &last_summary);
     ++batches;
   }
 

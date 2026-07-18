@@ -1,18 +1,42 @@
 #pragma once
 
-#include <cstdint>
+#include "pulse.pb.h"
 
-// Plain-C ABI so plugin modules can be dlopen()'d independently of C++
-// name-mangling/ABI concerns, mirroring how a real modular monolith keeps
-// its plugin boundary stable across independently built .so files.
+// Modules are still dlopen()'d independently and only exposed through a
+// handful of named symbols the host looks up with dlsym() -- that part of
+// "modular monolith" is unchanged. What changed is *what* crosses that
+// boundary.
 //
-// The key design point of this whole example: the host and every module
-// exchange only two things across this boundary -- raw bytes and their
-// length. Those bytes happen to be serialized protobuf messages, the very
-// same message types (pulse.PulseEventBatch, etc.) that the microservice
-// build sends over a TCP socket instead. Swapping dlopen()+function-call
-// for connect()+send() is the entire difference between the two
-// architectures in this repo.
+// An earlier version of this header made every module speak only raw
+// bytes, on the theory that it would mirror the microservice build's wire
+// format and make the two architectures directly comparable. In practice
+// that forced the host to serialize each IQBatch to bytes and the
+// detector module to parse it straight back -- a real cost paid for no
+// real reason, since host and module run in the same process and share
+// one address space.
+//
+// That cost is avoidable, and here's why it's *safe* to avoid: every
+// target in this build links the generated protobuf code from one shared
+// library, pulse_proto (see CMakeLists.txt -- originally added to stop
+// duplicate descriptor registration). Because of that, there is exactly
+// one definition of pulse::IQBatch, pulse::PulseEventBatch, etc. -- one
+// vtable, one layout -- loaded into the process no matter how many
+// plugins reference it. That's precisely the condition under which
+// passing a C++ reference to one of those types across a dlopen()
+// boundary is well-defined instead of undefined behavior. So modules
+// now take and return typed pulse:: messages directly: no serialize, no
+// parse, no heap-allocated byte buffer to free.
+//
+// The trade-off: this only works because every module in this build is
+// compiled by the same toolchain against the same headers as the host.
+// That's a reasonable assumption for a modular monolith shipped as one
+// versioned bundle (which is the point of the pattern), but it is *not*
+// a assumption the microservices get to make -- detector_service and
+// stats_service are separate processes with separate address spaces, so
+// they have no choice but to serialize onto the wire. That asymmetry is
+// real, not an artifact of this demo: in-process module boundaries can
+// avoid serialization if they share a build; true process boundaries
+// cannot.
 extern "C" {
 
 typedef void* pulse_module_t;
@@ -20,17 +44,21 @@ typedef void* pulse_module_t;
 typedef pulse_module_t (*pulse_module_create_fn)(const char* config);
 typedef void (*pulse_module_destroy_fn)(pulse_module_t handle);
 
-// Returns 0 on success. On success the module allocates *out_bytes (the
-// caller must release it via pulse_module_free_buffer).
-typedef int (*pulse_module_process_fn)(pulse_module_t handle, const uint8_t* in_bytes,
-                                        uint32_t in_len, uint8_t** out_bytes,
-                                        uint32_t* out_len);
+// Detector modules: consume a batch of IQ samples, append any pulses
+// found into *out (caller owns both; out is not cleared by the callee's
+// caller, so implementations must clear it themselves if they don't want
+// to accumulate across calls).
+typedef void (*pulse_detector_process_fn)(pulse_module_t handle, const pulse::IQBatch& batch,
+                                           pulse::PulseEventBatch* out);
 
-typedef void (*pulse_module_free_buffer_fn)(uint8_t* buffer);
+// Stats modules: fold a batch of pulse events into running state and
+// write the summary computed so far into *out.
+typedef void (*pulse_stats_process_fn)(pulse_module_t handle, const pulse::PulseEventBatch& batch,
+                                        pulse::PulseSummary* out);
 
 }  // extern "C"
 
 #define PULSE_MODULE_CREATE_SYM "pulse_module_create"
 #define PULSE_MODULE_DESTROY_SYM "pulse_module_destroy"
-#define PULSE_MODULE_PROCESS_SYM "pulse_module_process"
-#define PULSE_MODULE_FREE_BUFFER_SYM "pulse_module_free_buffer"
+#define PULSE_DETECTOR_PROCESS_SYM "pulse_detector_process"
+#define PULSE_STATS_PROCESS_SYM "pulse_stats_process"
