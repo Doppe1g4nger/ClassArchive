@@ -55,18 +55,24 @@ LoadedModule LoadModule(const std::string& path, const char* config) {
 
 int main(int argc, char** argv) {
   const std::string plugin_dir = argc > 1 ? argv[1] : ".";
+  const int num_pulses = argc > 2 ? std::atoi(argv[2]) : 6;
 
   LoadedModule detector =
       LoadModule(plugin_dir + "/libpulse_detector_plugin.so", "threshold=6.0,sample_rate=1000000");
   LoadedModule stats = LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=1000000");
 
-  pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/1000000.0, /*num_pulses=*/6);
+  pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/1000000.0, num_pulses);
   pulse::IQBatch iq_batch;
   pulse::PulseSummary last_summary;
   int batches = 0;
 
+  // Reused across iterations rather than declared inside the loop: a
+  // std::string retains its allocated capacity across clear()/assign, so
+  // this turns "reallocate every batch" into "reallocate once, memcpy
+  // after that."
+  std::string in_bytes;
+
   while (source.NextBatch(&iq_batch)) {
-    std::string in_bytes;
     iq_batch.SerializeToString(&in_bytes);
 
     uint8_t* det_out = nullptr;

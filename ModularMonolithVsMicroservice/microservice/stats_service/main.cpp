@@ -34,9 +34,11 @@ int main(int argc, char** argv) {
 
   pulsecore::PulseStatsAccumulator accumulator(kSampleRateHz);
   std::string payload;
+  // Reused across iterations for the same reason the plugin modules reuse
+  // theirs -- see pulse_detector_plugin.cpp.
+  pulse::PulseEventBatch events;
   int batches_received = 0;
   while (netutil::RecvMessage(client_fd, &payload)) {
-    pulse::PulseEventBatch events;
     if (!events.ParseFromString(payload)) {
       std::fprintf(stderr, "[stats_service] dropping malformed message\n");
       continue;

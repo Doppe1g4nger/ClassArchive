@@ -14,6 +14,10 @@ namespace {
 struct StatsModule {
   explicit StatsModule(double sample_rate_hz) : accumulator(sample_rate_hz) {}
   pulsecore::PulseStatsAccumulator accumulator;
+
+  // Reused across process() calls; see the equivalent member in
+  // pulse_detector_plugin.cpp for why.
+  pulse::PulseEventBatch in_batch;
 };
 
 }  // namespace
@@ -36,11 +40,10 @@ int pulse_module_process(pulse_module_t handle, const uint8_t* in_bytes, uint32_
                           uint8_t** out_bytes, uint32_t* out_len) {
   auto* module = static_cast<StatsModule*>(handle);
 
-  pulse::PulseEventBatch batch;
-  if (!batch.ParseFromArray(in_bytes, static_cast<int>(in_len))) {
+  if (!module->in_batch.ParseFromArray(in_bytes, static_cast<int>(in_len))) {
     return -1;
   }
-  module->accumulator.Add(batch);
+  module->accumulator.Add(module->in_batch);
 
   const pulse::PulseSummary summary = module->accumulator.Finalize();
   const uint32_t size = static_cast<uint32_t>(summary.ByteSizeLong());

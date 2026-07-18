@@ -27,7 +27,13 @@ class SyntheticIQSource {
   uint64_t sample_cursor_ = 0;
   uint32_t rng_state_;
 
-  static constexpr int kBatchSize = 256;
+  // Larger than a first-pass value (was 256): amortizes the fixed
+  // per-batch cost -- one protobuf serialize/parse, one module call or
+  // socket message -- over more samples. This helps both architectures,
+  // but disproportionately helps the microservice build since a socket
+  // round trip's fixed cost (syscalls, kernel copies) dwarfs an
+  // in-process function call's.
+  static constexpr int kBatchSize = 4096;
   static constexpr int kGapSamples = 400;
   static constexpr int kPulseSamples = 120;
   static constexpr double kPulseAmplitude = 10.0;

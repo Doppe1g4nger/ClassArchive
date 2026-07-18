@@ -17,6 +17,7 @@
 int main(int argc, char** argv) {
   const std::string host = argc > 1 ? argv[1] : "127.0.0.1";
   const uint16_t port = argc > 2 ? static_cast<uint16_t>(std::atoi(argv[2])) : 50051;
+  const int num_pulses = argc > 3 ? std::atoi(argv[3]) : 6;
 
   std::printf("[detector_service] connecting to stats_service at %s:%u\n", host.c_str(), port);
   const int fd = netutil::Connect(host, port);
@@ -27,15 +28,18 @@ int main(int argc, char** argv) {
 
   constexpr double kSampleRateHz = 1000000.0;
   pulsecore::PulseDetector detector(/*amplitude_threshold=*/6.0, kSampleRateHz);
-  pulsecore::SyntheticIQSource source(kSampleRateHz, /*num_pulses=*/6);
+  pulsecore::SyntheticIQSource source(kSampleRateHz, num_pulses);
 
   pulse::IQBatch iq_batch;
+  // Reused across iterations for the same reason the plugin modules reuse
+  // theirs -- see pulse_detector_plugin.cpp.
+  pulse::PulseEventBatch events;
+  std::string payload;
   int batches_sent = 0;
   while (source.NextBatch(&iq_batch)) {
-    pulse::PulseEventBatch events;
+    events.Clear();
     detector.Process(iq_batch, &events);
 
-    std::string payload;
     events.SerializeToString(&payload);
     if (!netutil::SendMessage(fd, payload)) {
       std::fprintf(stderr, "[detector_service] send failed, stats_service may have exited\n");

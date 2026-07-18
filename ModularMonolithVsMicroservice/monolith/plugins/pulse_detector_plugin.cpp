@@ -14,6 +14,15 @@ struct DetectorModule {
   explicit DetectorModule(double threshold, double sample_rate_hz)
       : detector(threshold, sample_rate_hz) {}
   pulsecore::PulseDetector detector;
+
+  // Reused across process() calls instead of declared as locals. Both
+  // messages contain repeated fields (samples / events) whose backing
+  // arrays protobuf otherwise has to reallocate from scratch on every
+  // construction and free on every destruction; keeping them as members
+  // and relying on Parse's implicit Clear() (or an explicit one) lets
+  // that backing storage be reused batch to batch.
+  pulse::IQBatch in_batch;
+  pulse::PulseEventBatch out_events;
 };
 
 }  // namespace
@@ -39,17 +48,19 @@ int pulse_module_process(pulse_module_t handle, const uint8_t* in_bytes, uint32_
                           uint8_t** out_bytes, uint32_t* out_len) {
   auto* module = static_cast<DetectorModule*>(handle);
 
-  pulse::IQBatch batch;
-  if (!batch.ParseFromArray(in_bytes, static_cast<int>(in_len))) {
+  // ParseFromArray() clears the target message before parsing, so this
+  // is a genuine reuse of in_batch's previously allocated capacity, not
+  // just a rename of the old local variable.
+  if (!module->in_batch.ParseFromArray(in_bytes, static_cast<int>(in_len))) {
     return -1;
   }
 
-  pulse::PulseEventBatch events;
-  module->detector.Process(batch, &events);
+  module->out_events.Clear();
+  module->detector.Process(module->in_batch, &module->out_events);
 
-  const uint32_t size = static_cast<uint32_t>(events.ByteSizeLong());
+  const uint32_t size = static_cast<uint32_t>(module->out_events.ByteSizeLong());
   uint8_t* buffer = new uint8_t[size];
-  if (!events.SerializeToArray(buffer, static_cast<int>(size))) {
+  if (!module->out_events.SerializeToArray(buffer, static_cast<int>(size))) {
     delete[] buffer;
     return -1;
   }
