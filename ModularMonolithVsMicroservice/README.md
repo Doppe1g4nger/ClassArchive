@@ -138,6 +138,12 @@ python/                    Python port of the same architecture, see "Python por
   microservice/
     framing.py                 Mirrors microservice/net/framing.cpp (identical wire format)
     detector_service.py ... deinterleave_service.py   Mirror the 5 C++ services exactly
+  multiproc/                 A third architecture: one process, forking five worker processes
+                                wired by multiprocessing.Pipe() instead of five independent
+                                executables wired by TCP -- see "A third Python architecture" below
+    detector_worker.py ... deinterleave_worker.py   Mirror the 5 microservice stages' algorithms
+                                and field-clearing exactly, just reading/writing pipe ends
+    multiproc_monolith_app.py  Entry point: forks all five workers, wires them, prints the result
 
 scripts/run_monolith.sh              Build + run the C++ monolith
 scripts/run_microservices.sh         Build + run the C++ five-service chain
@@ -145,8 +151,9 @@ scripts/benchmark.sh                 Build + time N runs of the C++ architecture
 scripts/gen_python_proto.sh          Regenerate python/pulsecore/pulse_pb2.py
 scripts/run_python_monolith.sh       Run the Python monolith
 scripts/run_python_microservices.sh  Run the Python five-service chain
+scripts/run_python_multiproc.sh      Run the Python forked-worker build
 scripts/benchmark_python.sh          Time N runs of all four, wall clock (includes startup)
-scripts/benchmark_steady_state.sh    Time N runs of all four, steady-state only (startup excluded)
+scripts/benchmark_steady_state.sh    Time N runs of all five, steady-state only (startup excluded)
 ```
 
 ## Building
@@ -243,12 +250,20 @@ build if both happen to run at once:
 ./scripts/run_python_microservices.sh 20151 1000000
 ```
 
-All four print the same detected pulse count, summary statistics,
+**Python multiproc** (one process, forking five worker processes wired by
+`multiprocessing.Pipe()` — see "A third Python architecture" below):
+
+```sh
+./scripts/run_python_multiproc.sh [num_pulses]
+./scripts/run_python_multiproc.sh 1000000     # one full second at 1,000,000 pulses/sec
+```
+
+All five print the same detected pulse count, summary statistics,
 spectrum, jam-detection state, and emitter tracks, computed from the same
 synthetic IQ data (`num_pulses` rectangular pulses buried in noise, 1000
 by default — one full buffer at this repo's scale) — that's the point:
-it's the same result, produced four structurally different ways (two
-architectures times two languages). As a built-in consistency check:
+it's the same result, produced five structurally different ways. As a
+built-in consistency check:
 since the synthetic source only ever emits one emitter's worth of pulses,
 the deinterleaver should always converge to exactly one track whose
 `estimated_pri_us` and `pulses` match `stats`' `mean_pri_us` and `pulses`
@@ -749,6 +764,51 @@ this effect depend on how many CPU cores are actually available -- on a
 single-core machine neither architecture could benefit, since there'd be
 nowhere for the extra processes to run in parallel.
 
+### A third Python architecture: multiprocessing
+
+The GIL explanation above raises an obvious follow-up: is *threading*
+also a fix, or does it have to be separate processes? And if it's
+processes either way, is the microservices build's TCP/protobuf boundary
+actually buying anything, or would plain multiprocessing get the same win
+for less machinery?
+
+Threading doesn't help here -- the GIL prevents concurrent *bytecode*
+execution across threads in the same process regardless of how many
+threads exist, so a threaded version of `monolith_app.py` would still be
+bound to one core for this CPU-bound work, the same as it is today (quite
+possibly slightly worse, from lock-handoff overhead as threads trade the
+GIL back and forth for no parallelism gained). Multiprocessing does help,
+which is unsurprising once you notice it's the same trick the
+microservices build already relies on: separate OS processes, each with
+its own GIL.
+
+`python/multiproc/` puts that trick in its most direct form: one script
+(`multiproc_monolith_app.py`) that forks five worker processes --
+`detector_worker.py` through `deinterleave_worker.py`, each running the
+exact same algorithm and field-clearing logic as its
+`microservice/*_service.py` counterpart -- and wires them together with
+`multiprocessing.Pipe()` instead of TCP sockets. Structurally it's much
+closer to the monolith than to the microservices build: one command, no
+ports, no independently-launched executables, no reverse-order startup
+dance (a `Pipe()` is created synchronously by the parent before any
+worker is even forked, so there's no `bind()`/`listen()`/`accept()`/
+`connect()` sequence to reason about at all). It also can't rely on a
+socket's half-close to signal end-of-stream the way `framing.py` does --
+every worker here is forked from the same parent *after* all four pipes
+already exist, so every sibling inherits its own file descriptor for
+every pipe end, not just the one or two it actually uses; real EOF would
+require every one of those duplicates closed. Each worker sends an
+explicit `None` down its outbound pipe instead, once it has no more
+batches to forward.
+
+What this build keeps from the microservices build is exactly the one
+property the GIL explanation above says should matter: five separate
+processes, five separate GILs, real multi-core parallelism once the
+pipeline is full. It's designed as a controlled variant, not a competing
+benchmark target -- it isolates "multiple processes" from "network
+boundary" so the steady-state numbers below can show which one was
+actually doing the work.
+
 ## Steady-state benchmark
 
 Every benchmark above times each run from the *outside*: `date`/wall clock
@@ -761,11 +821,11 @@ run it once," but it conflates two very different costs: one-time setup
 and repeatable steady-state throughput. `scripts/benchmark_steady_state.sh`
 isolates the second one.
 
-**Methodology.** Every one of the twelve programs in this repo (six C++,
-six Python) now self-reports its own steady-state duration on a
-`STEADY_STATE_MS <value>` line, using its own local clock
-(`std::chrono::steady_clock` / `time.perf_counter()`) around only the
-batch-processing loop:
+**Methodology.** Every one of the seventeen programs in this repo (six
+C++, eleven Python -- six standalone plus five `multiproc` workers) now
+self-reports its own steady-state duration on a `STEADY_STATE_MS <value>`
+line, using its own local clock (`std::chrono::steady_clock` /
+`time.perf_counter()`) around only the batch-processing loop:
 
 - `monolith_app`/`monolith_app.py` start the timer right after `dlopen()`/
   `import`-ing all five modules, and stop it after the last batch has been
@@ -775,41 +835,49 @@ batch-processing loop:
   thread.
 - `detector_service`/`detector_service.py` (the chain's producer) start
   the timer right after `connect()` to `spectrogram_service` succeeds, and
-  stop it after the last batch has been sent.
-- `deinterleave_service`/`deinterleave_service.py` (the chain's sink)
-  start the timer on their *first* successful receive and stop it on
-  their last -- i.e. the span from "the first frame reaches the end of
-  the chain" to "the last frame reaches the end of the chain."
+  stop it after the last batch has been sent. `multiproc/detector_worker.py`
+  starts its timer right at the top of its loop instead, since a
+  `multiprocessing.Pipe()` needs no analogous connect step (see "A third
+  Python architecture" above) -- there's no setup cost left to wait out.
+- `deinterleave_service`/`deinterleave_service.py`/
+  `multiproc/deinterleave_worker.py` (each build's sink) start the timer
+  on their *first* successful receive and stop it on their last -- i.e.
+  the span from "the first frame reaches the end of the chain" to "the
+  last frame reaches the end of the chain."
 
-That sink-side span is the number this script actually reports for the
-microservice builds, for a reason worth spelling out: because every
-service (other than the producer) must connect downstream before it can
-accept upstream, the whole chain has to be five-deep connected before
-`detector_service`'s own `connect()` can succeed at all -- which means no
-data can reach `deinterleave_service` any earlier than that either. So the
-sink's first-recv-to-last-recv span is, by construction, exactly the
-whole pipeline's steady-state drain time, with zero cross-process
-timestamp correlation needed to prove it excludes connection setup. (The
-middle stages and `detector_service` also report their own
+That sink-side span is the number this script reports for both the TCP
+microservices and the multiproc build, for a reason worth spelling out:
+for the TCP build, every service (other than the producer) must connect
+downstream before it can accept upstream, so the whole chain has to be
+five-deep connected before `detector_service`'s own `connect()` can
+succeed at all -- meaning no data can reach `deinterleave_service` any
+earlier than that either. The multiproc build gets the same guarantee
+more directly: `multiproc_monolith_app.py` only starts feeding it batches
+after every worker has been forked and every pipe end handed off, so
+nothing can reach `deinterleave_worker.py` before the whole chain exists.
+Either way, the sink's first-recv-to-last-recv span is, by construction,
+exactly its build's whole-pipeline steady-state drain time, with zero
+cross-process timestamp correlation needed to prove it excludes setup
+cost. (The middle stages and each build's producer also report their own
 `STEADY_STATE_MS`, printed to stdout/discarded by this script, for anyone
-who wants to see which single stage is the pipeline's bottleneck --
-they're just not the number the summary table below uses.)
+who wants to see which single stage is the bottleneck -- they're just not
+the number the summary table below uses.)
 
 **Two different things are being measured.** The monolith number is the
 *sum* of all five stages' work on every batch, since the monolith runs
 them sequentially in one thread with no overlap between batches. The
-microservices sink number is *pipelined* throughput: five OS processes
-run concurrently, so once the pipeline is full, stage N can be working on
-batch K while stage N-1 is already producing batch K+1, and the sink's
-drain rate is bounded by whichever single stage is slowest, not by the
-sum of all five. That's not a flaw in the measurement -- it's a real
-architectural difference between the two builds, the same one a
-production pipeline would actually experience -- but it does mean this
-comparison isn't strictly "identical total work, architecture X pays more
-overhead than architecture Y." It's closer to "sequential total cost vs.
-pipelined bottleneck-bound throughput," and the microservices number can
+microservices and multiproc sink numbers are *pipelined* throughput: five
+OS processes run concurrently, so once the pipeline is full, stage N can
+be working on batch K while stage N-1 is already producing batch K+1, and
+the sink's drain rate is bounded by whichever single stage is slowest,
+not by the sum of all five. That's not a flaw in the measurement -- it's
+a real architectural difference between the two kinds of build, the same
+one a production pipeline would actually experience -- but it does mean
+this comparison isn't strictly "identical total work, architecture X pays
+more overhead than architecture Y." It's closer to "sequential total cost
+vs. pipelined bottleneck-bound throughput," and the pipelined numbers can
 look better than naive intuition suggests for exactly that reason (see
-the Python results below, where it does).
+the Python results below, where they do).
 
 Run it with `./scripts/benchmark_steady_state.sh [runs] [num_pulses]`
 (defaults: 20 runs, 50,000 pulses/run = 50 batches/run). The pulse count
@@ -820,55 +888,77 @@ batches) produced wildly noisy, physically implausible per-run swings --
 there just aren't enough inter-arrival gaps in the window to average over.
 50 batches/run was enough to bring run-to-run variance down to a
 reasonable range without making the Python runs (the slower side of this
-comparison) take more than about a minute and a half total.
+comparison) take more than about two minutes total.
 
 ```
 Steady-state results over 20 runs, 50000 pulses/run:
 
-            C++ monolith  min=  15.910ms  median=  18.655ms  mean=  18.537ms  stdev= 0.858ms  max=  19.548ms
-       C++ microservices  min=  46.265ms  median=  56.957ms  mean=  59.076ms  stdev= 8.605ms  max=  85.664ms
-         Python monolith  min=2291.714ms  median=2420.080ms  mean=2436.328ms  stdev=97.199ms  max=2642.909ms
-    Python microservices  min=1357.845ms  median=1450.683ms  mean=1461.207ms  stdev=60.801ms  max=1604.853ms
+            C++ monolith  min=  16.725ms  median=  18.486ms  mean=  18.405ms  stdev=  0.439ms  max=  18.804ms
+       C++ microservices  min=  48.311ms  median=  52.892ms  mean=  55.389ms  stdev=  6.270ms  max=  71.484ms
+         Python monolith  min=2167.515ms  median=2373.186ms  mean=2352.443ms  stdev= 68.277ms  max=2425.046ms
+    Python microservices  min=1323.493ms  median=1439.284ms  mean=1527.788ms  stdev=238.881ms  max=2106.410ms
+        Python multiproc  min=1334.955ms  median=1463.014ms  mean=1473.711ms  stdev= 86.918ms  max=1737.974ms
 
-Python monolith is 131.4x the C++ monolith mean
-Python microservices is 24.7x the C++ microservices mean
-C++ microservices is 3.19x the C++ monolith mean
-Python microservices is 0.60x the Python monolith mean
+Python monolith is 127.8x the C++ monolith mean
+Python microservices is 27.6x the C++ microservices mean
+C++ microservices is 3.01x the C++ monolith mean
+Python microservices is 0.65x the Python monolith mean
+Python multiproc is 0.63x the Python monolith mean
+Python multiproc is 0.96x the Python microservices mean
 ```
 
 With startup and connection setup excluded, the qualitative picture from
 the wall-clock benchmarks above holds up, and actually sharpens:
 
-- **C++ microservices still cost ~3.2x the monolith**, essentially
+- **C++ microservices still cost ~3.0x the monolith**, essentially
   identical to the ~3.2x seen at the small wall-clock scale (see "At the
   smaller, one-buffer (1000-pulse) scale" above) -- which says the ratio
   measured there was never mostly a startup artifact. The per-batch
   serialize/parse/syscall cost paid at each of the chain's four hops
   really is the dominant term, not process-launch overhead riding along
   with it.
-- **Python microservices still beat the Python monolith** (0.60x, i.e.
-  ~40% faster), the same GIL-driven crossover documented in "Python vs
+- **Both Python multi-process builds still beat the Python monolith**
+  (0.65x for microservices, 0.63x for multiproc -- both roughly
+  35-37% faster), the same GIL-driven crossover documented in "Python vs
   C++" above -- and here it's isolated from any contribution by
   process-startup parallelism, since none of these timers start until
-  every process is already up and connected. The five Python processes
-  genuinely pipeline CPU-bound work across cores once the chain is
+  every process is already up and connected/wired. The processes
+  genuinely pipeline CPU-bound work across cores once the pipeline is
   flowing; that's a steady-state effect, not a startup one.
+- **Multiproc and microservices land within noise of each other**
+  (0.96x -- multiproc very slightly faster, well inside both builds'
+  run-to-run variance). That answers the question "A third Python
+  architecture" above posed: at this workload, escaping the GIL is what
+  buys the win, not TCP/protobuf specifically -- a `multiprocessing.Pipe()`
+  gets the same steady-state throughput as a socket once both builds are
+  past their (very different) setup costs. Where they *do* differ is
+  everything this benchmark deliberately excludes: the microservices
+  build's five independent executables, ports, and reverse-order startup
+  versus multiproc's one command and no network stack at all -- a real
+  advantage for multiproc that a steady-state-only number can't show,
+  which is exactly why "Steady-state benchmark" and the wall-clock
+  benchmarks above are answering different questions on purpose.
 
 ## Correctness
 
 Every change in this repo's history was re-verified the same way: run the
 relevant binaries/scripts at a small pulse count and a larger one and diff
-the printed output. All four builds -- C++ monolith, C++ microservices,
-Python monolith, Python microservices -- have produced byte-identical
-summary statistics, spectrogram bins, jam-detection state, and
-deinterleaved tracks in every case, including after adding the three new
-apps, after the spectrogram phasor-rotation fix, after converting the
+the printed output. All five builds -- C++ monolith, C++ microservices,
+Python monolith, Python microservices, Python multiproc -- have produced
+byte-identical summary statistics, spectrogram bins, jam-detection state,
+and deinterleaved tracks in every case, including after adding the three
+new apps, after the spectrogram phasor-rotation fix, after converting the
 fan-out topology into a linear chain, after reordering that chain and
 clearing unused fields between hops, after scaling the signal rate up to
-1,000,000 pulses/sec, after adding the Python port, and after adding the
+1,000,000 pulses/sec, after adding the Python port, after adding the
 `STEADY_STATE_MS` instrumentation for the steady-state benchmark above
 (every program's non-timing output is unchanged; the new timer variables
-only wrap existing loops and add one new printed line each). Clearing a field a
+only wrap existing loops and add one new printed line each), and after
+adding the Python multiproc build (verified against both the Python
+monolith's and the C++ monolith's output at 1000 and 50,000 pulses, and
+re-run five times back to back to confirm the forked workers' explicit
+`None`-sentinel shutdown -- see "A third Python architecture" above --
+never leaves a process hung or a result nondeterministic). Clearing a field a
 stage already consumed and copying its value into a local variable first
 (see `spectrogram_service`/`jammer_service`/`stats_service`'s
 `last_summary` pattern, in both languages) is exactly the kind of change

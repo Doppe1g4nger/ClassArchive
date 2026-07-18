@@ -46,8 +46,9 @@ CPP_MONO_TIMES="$(mktemp)"
 CPP_MICRO_TIMES="$(mktemp)"
 PY_MONO_TIMES="$(mktemp)"
 PY_MICRO_TIMES="$(mktemp)"
+PY_MULTI_TIMES="$(mktemp)"
 SINK_OUT="$(mktemp)"
-trap 'rm -f "$CPP_MONO_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$SINK_OUT"' EXIT
+trap 'rm -f "$CPP_MONO_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$PY_MULTI_TIMES" "$SINK_OUT"' EXIT
 
 # Pulls the numeric value out of a "... STEADY_STATE_MS <value>" line from
 # stdin. Every program in this repo prints exactly one such line.
@@ -145,11 +146,20 @@ done
 echo "done"
 echo
 
-python3 - "$CPP_MONO_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$RUNS" "$NUM_PULSES" <<'PYEOF'
+echo "== Python multiproc (forked chain) =="
+for i in $(seq 1 "$RUNS"); do
+  "$PY" python/multiproc/multiproc_monolith_app.py "$NUM_PULSES" | extract_ms >> "$PY_MULTI_TIMES"
+done
+echo "done"
+echo
+
+python3 - "$CPP_MONO_TIMES" "$CPP_MICRO_TIMES" "$PY_MONO_TIMES" "$PY_MICRO_TIMES" "$PY_MULTI_TIMES" "$RUNS" "$NUM_PULSES" <<'PYEOF'
 import statistics
 import sys
 
-cpp_mono_path, cpp_micro_path, py_mono_path, py_micro_path, runs, num_pulses = sys.argv[1:7]
+cpp_mono_path, cpp_micro_path, py_mono_path, py_micro_path, py_multi_path, runs, num_pulses = (
+    sys.argv[1:8]
+)
 
 
 def load(path):
@@ -161,12 +171,14 @@ cpp_mono = load(cpp_mono_path)
 cpp_micro = load(cpp_micro_path)
 py_mono = load(py_mono_path)
 py_micro = load(py_micro_path)
+py_multi = load(py_multi_path)
 
 for name, xs, expected in [
     ("C++ monolith", cpp_mono, int(runs)),
     ("C++ microservices", cpp_micro, int(runs)),
     ("Python monolith", py_mono, int(runs)),
     ("Python microservices", py_micro, int(runs)),
+    ("Python multiproc", py_multi, int(runs)),
 ]:
     if len(xs) != expected:
         print(
@@ -192,13 +204,17 @@ summarize("C++ monolith", cpp_mono)
 summarize("C++ microservices", cpp_micro)
 summarize("Python monolith", py_mono)
 summarize("Python microservices", py_micro)
+summarize("Python multiproc", py_multi)
 
-if cpp_mono and cpp_micro and py_mono and py_micro:
+if cpp_mono and cpp_micro and py_mono and py_micro and py_multi:
     print()
     mc, mp = statistics.mean(cpp_mono), statistics.mean(py_mono)
     sc, sp = statistics.mean(cpp_micro), statistics.mean(py_micro)
+    pm = statistics.mean(py_multi)
     print(f"Python monolith is {mp / mc:.1f}x the C++ monolith mean")
     print(f"Python microservices is {sp / sc:.1f}x the C++ microservices mean")
     print(f"C++ microservices is {sc / mc:.2f}x the C++ monolith mean")
     print(f"Python microservices is {sp / mp:.2f}x the Python monolith mean")
+    print(f"Python multiproc is {pm / mp:.2f}x the Python monolith mean")
+    print(f"Python multiproc is {pm / sp:.2f}x the Python microservices mean")
 PYEOF
