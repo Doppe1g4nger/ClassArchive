@@ -1199,24 +1199,22 @@ rounds once instead of twice and would silently produce a different
 last bit than the scalar version's separate multiply-then-add, for
 every sample.)
 
-**Why the RNG isn't vectorized in numpy_variant.** The xorshift32
-RNG is a genuinely sequential recurrence -- each state depends on the
-previous one -- which doesn't rewrite into bulk array ops without a
-materially more advanced technique (jump-ahead via the RNG's underlying
-linear-recurrence structure over GF(2), computable but out of proportion
-for what this variant is demonstrating). `numba_variant` has no such
-problem: numba JIT-compiles the sequential RNG loop directly, no rewrite
-required. That asymmetry -- one technique shrugs off a sequential
-bottleneck, the other can't without real extra work -- is one of the
-more interesting differences between the two approaches, not an
-oversight in either. (As first built, numpy_variant sidestepped the
-question entirely by generating through the existing protobuf-based
-`pulsecore.iq_source` generator and converting each batch to arrays --
-until profiling measured that round-trip as its single biggest cost and
-the second optimization pass replaced it with an array-native generator
-whose only remaining Python loop is the RNG recurrence itself; see
-"Profile-driven optimization, round 2" below and
-`numpy_variant/iq_source_arrays.py`.)
+**The RNG and numpy: a bottleneck that moved three times.** The
+xorshift32 RNG is a genuinely sequential recurrence -- each state
+depends on the previous one -- which doesn't rewrite into bulk array
+ops without a materially more advanced technique. `numba_variant` has
+no such problem: numba JIT-compiles the sequential loop directly, no
+rewrite required. That asymmetry -- one technique shrugs off a
+sequential bottleneck, the other can't without real extra work -- is
+one of the more interesting differences between the two approaches.
+numpy_variant's generation went through three designs as profiling kept
+relocating its bottleneck: first through the protobuf generator plus
+per-batch array conversion (measured as its biggest cost; removed in
+round 2), then array-native with only the RNG recurrence left as a
+Python loop (which then *became* the biggest cost), and finally the
+advanced technique after all -- GF(2) jump-ahead, once it was the only
+thing left to fix. See "Vectorizing the 'unvectorizable' RNG" under
+round 2 below, and `numpy_variant/iq_source_arrays.py` for the design.
 
 ### An AVX regression, caught and fixed, not just reported
 
@@ -1704,13 +1702,62 @@ overhead -- compare shapes, not absolutes):
   sequential RNG loop in `iq_source_arrays.next_batch` (0.33s) -- the
   one thing this variant documented as not vectorizable without
   jump-ahead machinery. The variant is now bounded by exactly the
-  limitation its docstrings claimed.
+  limitation its docstrings claimed. (This finding didn't stay final:
+  the jump-ahead machinery got built after all -- see "Vectorizing the
+  'unvectorizable' RNG" below.)
 - *numba* (0.66s profiled, nearly all of it JIT cache loading outside
   the steady-state timer): the hot path has effectively vanished from
   the Python-level profile -- the largest genuine work item is the
   spectrogram kernel at 13ms. There is nothing interpreted left to
   optimize; further gains would have to come from the kernels
   themselves.
+
+### Vectorizing the "unvectorizable" RNG (GF(2) jump-ahead)
+
+Round 2 left numpy_variant bounded by its sequential RNG loop and the
+docs calling jump-ahead "out of proportion." With the loop now the
+variant's *only* dominant cost, the proportion argument flipped, so the
+machinery got built (`numpy_variant/iq_source_arrays.py`).
+
+The insight that makes it possible: every operation in xorshift32's
+step (`s ^= s<<13; s ^= s>>17; s ^= s<<5`) is an XOR of bit-shifts, so
+one step is a linear map over GF(2) -- a 32x32 bit-matrix `M` with
+`state(n+k) = M^k * state(n)`, and `M^k` computable once by
+square-and-multiply. "Inherently sequential" turns out to mean
+"sequential only if you evaluate it that way":
+
+- A full batch's 20,000 draws split into 2,500 lanes of 8 consecutive
+  draws each; lanes own *contiguous* chunks, so a row-major grid
+  flattens into exactly the scalar sequence order.
+- Within a batch, all lanes advance together: the plain three-shift
+  step applied elementwise to a uint32 array, 8 times (~150 numpy calls
+  replacing 20,000 interpreted iterations).
+- Between batches, every lane jumps the same fixed distance via one
+  precomputed `M^(20000-8)` applied vectorized.
+- Lane seeding is one scalar pre-run at construction time, outside the
+  steady-state timer under the same rule that excludes numba's JIT
+  warm-up; the 8-sample tail batch falls back to the scalar loop.
+
+Everything is exact integer XOR/shift until the final elementwise
+float conversion, so the output is **bit-identical** to the scalar
+generator -- same sequence, different evaluation order -- and that's
+enforced by the existing generator-equality checks in
+`verify_numpy_variant.py` and the unit tests, which compare against the
+protobuf generator sample for sample and don't care how the numbers
+were produced.
+
+Measured effect: the microbenchmarked RNG went from ~6.5ms to ~0.4ms
+per batch (16x), and the variant's steady state from ~565ms to ~462ms
+median back-to-back (~1.2x). That's real but smaller than the ~330ms
+the round-2 cProfile attributed to the loop -- profiler overhead
+inflates per-iteration loop costs, a measurement caveat worth naming.
+Post-change profiling shows the RNG gone from the profile entirely; the
+variant's floor is now per-*event* work (the detector kernel's two
+tiny-array reductions per detected pulse -- `np.ufunc.reduceat` over
+the pulse boundaries would be the next fix if one were wanted) plus the
+pure-Python stats/deinterleaver stages. The bottleneck has now moved
+three times in this one variant, each move measured, which is about as
+clean an illustration of iterative profiling as this repo has to offer.
 
 ## Tests
 

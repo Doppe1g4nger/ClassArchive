@@ -29,21 +29,19 @@ verify_numpy_variant.py), not just asserted:
    call: the optimization that helps the scalar/numba versions would
    actively hurt this one.
 
-The noise generator's xorshift32 RNG is a genuinely sequential
-recurrence (each state depends on the previous one), which doesn't
-rewrite into bulk array ops without a materially more advanced
-technique (e.g. jump-ahead via the RNG's underlying linear-recurrence
-structure) that's out of proportion for what this variant is
-demonstrating -- numba can JIT-compile that same sequential loop
-directly with no rewrite required, an asymmetry between the two
-approaches worth noticing. This variant originally routed generation
-through pulse_pb2.IQBatch (pulsecore's generator) and converted with
-array_view.extract_iq; cProfile then measured that round-trip as the
-variant's single biggest cost, bigger than every vectorized kernel
-combined, so generation now writes straight into numpy arrays with only
-the RNG recurrence left in a Python loop -- see iq_source_arrays.py for
-what's vectorized there, what isn't, and why the output is still
-bit-identical to pulsecore's generator.
+Generation's history tracks this variant's whole optimization arc: it
+first routed through pulse_pb2.IQBatch and converted with
+array_view.extract_iq (measured as the variant's single biggest cost),
+then wrote straight into numpy arrays with only the xorshift32
+recurrence left as a Python loop (that loop then became the dominant
+remaining cost), and finally vectorized the recurrence itself via GF(2)
+jump-ahead -- the "materially more advanced technique" earlier versions
+of this docstring deferred as out of proportion, adopted once profiling
+showed it was the only thing left. numba never needed any of this: it
+JIT-compiles the sequential loop as-is, an asymmetry between the two
+approaches worth noticing. See iq_source_arrays.py for the jump-ahead
+design and why the output is still bit-identical to pulsecore's
+generator.
 """
 import numpy as np
 
