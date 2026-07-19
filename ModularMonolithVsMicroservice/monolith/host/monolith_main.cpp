@@ -18,15 +18,16 @@
 
 #include <dlfcn.h>
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "iq_source.h"
 #include "module_api.h"
 #include "pulse.pb.h"
+#include "threaded_pipeline.h"
 
 namespace {
 
@@ -83,34 +84,43 @@ int main(int argc, char** argv) {
   };
 
   pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/10000000.0, num_pulses);
-  // Reused across iterations for the same reason common/ loops reuse
-  // their message objects -- see pulse_detector_plugin.cpp's history.
-  // frame.iq() is filled directly by NextBatch() below (no copy); every
-  // other field is written by whichever chain stage owns it.
-  pulse::PipelineFrame frame;
-  int batches = 0;
 
-  // Timed region starts here and covers only the batch-processing loop --
-  // module loading (dlopen()/dlsym() above) and teardown (dlclose() below)
-  // are deliberately excluded, so this number reflects steady-state
+  // Theoretical-limits branch: the module chain runs as a stage-per-
+  // thread pipeline (see threaded_pipeline.h) instead of one thread
+  // calling all five modules per batch. Same modules, same dlopen
+  // boundary, same per-batch call order guarantees -- each module is
+  // still invoked from exactly one thread, in batch order, so its
+  // internal running state needs no locking. The grouping below is
+  // sized to this repo's 4-core benchmark box: generation+detector
+  // fused (the chain fuses them into detector_service too), the two
+  // remaining iq-readers get a thread each, and the two cheap
+  // events-only stages share the fourth thread.
+  std::vector<pulse::PipelineFrame> slots(8);
+  std::vector<std::function<void(pulse::PipelineFrame*)>> stages = {
+      [&](pulse::PipelineFrame* f) { chain[0].process(chain[0].instance, f); },  // detector
+      [&](pulse::PipelineFrame* f) { chain[1].process(chain[1].instance, f); },  // spectrogram
+      [&](pulse::PipelineFrame* f) { chain[2].process(chain[2].instance, f); },  // jammer
+      [&](pulse::PipelineFrame* f) {                                             // stats + deint
+        chain[3].process(chain[3].instance, f);
+        chain[4].process(chain[4].instance, f);
+      },
+  };
+
+  // Timed region covers only the pipeline run -- module loading
+  // (dlopen()/dlsym() above) and teardown (dlclose() below) are
+  // deliberately excluded, so this number reflects steady-state
   // throughput rather than one-time process/module-load cost. See
   // microservice/deinterleave_service/main.cpp for the equivalent
   // measurement on the chain build, and scripts/benchmark_steady_state.sh
   // for how these numbers get compared.
-  const auto steady_state_start = std::chrono::steady_clock::now();
-  while (source.NextBatch(frame.mutable_iq())) {
-    for (LoadedModule& stage : chain) {
-      stage.process(stage.instance, &frame);
-    }
-    ++batches;
-  }
-  const auto steady_state_end = std::chrono::steady_clock::now();
-  const double steady_state_ms =
-      std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count();
+  const monolith::ThreadedPipelineResult run =
+      monolith::RunThreadedPipeline(&source, stages, &slots);
+  const pulse::PipelineFrame& frame = *run.final_frame;
 
-  std::printf("[monolith_app] processed %d IQ batches through a dynamically-linked chain of %zu modules\n",
-              batches, chain.size());
-  std::printf("[monolith_app] STEADY_STATE_MS %.6f\n", steady_state_ms);
+  std::printf(
+      "[monolith_app] processed %d IQ batches through a dynamically-linked chain of %zu modules\n",
+      run.batches, chain.size());
+  std::printf("[monolith_app] STEADY_STATE_MS %.6f\n", run.steady_state_ms);
 
   const pulse::SpectrogramSummary& spectrogram = frame.spectrogram();
   std::printf("[monolith_app] spectrogram: %d bins, %.1f Hz spacing, %llu frames\n",

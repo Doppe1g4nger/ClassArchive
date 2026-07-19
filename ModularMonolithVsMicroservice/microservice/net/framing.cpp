@@ -117,6 +117,28 @@ Channel* Connect(const std::string& /*host*/, uint16_t port) {
   }
   if (fd < 0) return nullptr;
 
+  // The name exists as soon as the consumer's shm_open(O_CREAT)
+  // returns, which is BEFORE its ftruncate() has sized the segment.
+  // mmap'ing a still-zero-length segment succeeds, but the first page
+  // touch past EOF delivers SIGBUS -- even the magic-word spin below
+  // would fault. So wait for the file to reach full size first; only
+  // then is every page of the mapping backed. (Caught as a real
+  // once-in-hundreds-of-runs Bus error during benchmarking, not
+  // hypothesized.)
+  struct stat st;
+  for (int attempt = 0; attempt < 20000; ++attempt) {
+    if (::fstat(fd, &st) != 0) {
+      ::close(fd);
+      return nullptr;
+    }
+    if (st.st_size >= static_cast<off_t>(kRingBytes)) break;
+    ::usleep(1000);
+  }
+  if (st.st_size < static_cast<off_t>(kRingBytes)) {
+    ::close(fd);
+    return nullptr;
+  }
+
   void* mem = ::mmap(nullptr, kRingBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   ::close(fd);
   if (mem == MAP_FAILED) return nullptr;

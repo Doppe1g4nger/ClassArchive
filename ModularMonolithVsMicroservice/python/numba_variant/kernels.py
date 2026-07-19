@@ -2,17 +2,16 @@
 spectrogram.py, jammer.py, and iq_source.py, typed for @njit and
 operating on flat numpy arrays instead of pulse_pb2 messages.
 
-Why this preserves bit-for-bit correctness where numpy_variant/ can't:
-numba compiles the *exact* Python source-level loop -- same operations,
-same order, no reduction reordering -- down to a native loop. A
-sequential accumulation like `re += ...` inside a `for` loop stays a
-sequential accumulation after JIT compilation; it's compiled, not
-rewritten. numpy's vectorized reductions (`array.sum()`, etc.) do the
-opposite on purpose -- they reorder additions (pairwise summation, SIMD
-lanes) specifically to go faster, which is *why* numpy is fast, but it
-means results are only equal to the scalar version within floating-point
-tolerance, not bit-identical. See numpy_variant/kernels.py's docstring
-for that side of the comparison.
+Theoretical-limits branch: every kernel is compiled fastmath=True, the
+LLVM equivalent of the -ffast-math the C++ side now uses globally --
+reassociation, FMA contraction, and vectorization of the floating-point
+loops are all permitted. That formally ends this variant's bit-for-bit
+parity with the pure-Python reference (which earlier branches could
+promise precisely because numba compiled the exact source-level loop
+without rewriting it); parity is now asserted within 1e-12 relative
+tolerance by tests/test_variants.py, the same trade the C++ builds made
+and for the same reason: the sequential-order guarantee was the last
+thing standing between these loops and the vector units.
 
 None of these functions know about pulse_pb2 at all -- and since the
 stats accumulator and deinterleaver became kernels too (see below),
@@ -30,7 +29,7 @@ _UINT32_MAX = np.float64(0xFFFFFFFF)
 _MASK32 = np.uint32(0xFFFFFFFF)
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def generate_batch(cursor, count, period, gap_samples, pulse_component, noise_amplitude, rng_state):
     """JIT-compiled port of iq_source.py's inlined xorshift32 generator
     loop -- same sequential RNG, same order, just compiled instead of
@@ -72,7 +71,7 @@ def generate_batch(cursor, count, period, gap_samples, pulse_component, noise_am
     return i_arr, q_arr, idx_arr, rng
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def detect_pulses(i_arr, q_arr, idx_arr, threshold_sq, sample_rate_hz,
                    in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count):
     """JIT-compiled port of pulse_detector.py's process() loop. Returns
@@ -119,7 +118,7 @@ def detect_pulses(i_arr, q_arr, idx_arr, threshold_sq, sample_rate_hz,
             ev_dur[:n_events], in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count)
 
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=True, fastmath=True)
 def spectrogram_bins(i_arr, q_arr, first_sample_index, sample_rate_hz, num_bins, bin_hz,
                       max_magnitude, sum_magnitude):
     """JIT-compiled port of spectrogram.py's process() loop -- same
@@ -127,9 +126,9 @@ def spectrogram_bins(i_arr, q_arr, first_sample_index, sample_rate_hz, num_bins,
     accumulation within each bin. The *bins* run in parallel (prange):
     each bin's correlator is fully independent -- its own phasor, its
     own accumulators, its own output slots -- so threading them changes
-    nothing about any bin's operation order, and the output stays
-    bit-identical to the sequential version (enforced by the parity
-    tests, same as every other kernel here). This was the numba build's
+    nothing about any bin's operation order (fastmath may, though --
+    parity with the reference is tolerance-gated now, see the module
+    docstring, same as every other kernel here). This was the numba build's
     largest remaining kernel by profile; parallel=True costs a
     per-call thread handoff, which the before/after numbers in the
     README weigh against the win."""
@@ -167,7 +166,7 @@ def spectrogram_bins(i_arr, q_arr, first_sample_index, sample_rate_hz, num_bins,
     return max_magnitude, sum_magnitude
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def jammer_power(i_arr, q_arr, power_threshold):
     """JIT-compiled port of jammer.py's process() loop."""
     n = i_arr.shape[0]
@@ -194,7 +193,7 @@ def jammer_power(i_arr, q_arr, power_threshold):
 # build needs pulse_pb2 for anything anymore.
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def stats_accumulate(ev_start, ev_peak, ev_dur, sample_rate_hz,
                       count, peak_sum, duration_sum, peak_min, peak_max,
                       pri_sum, pri_count, have_prev, prev_start):
@@ -221,7 +220,7 @@ def stats_accumulate(ev_start, ev_peak, ev_dur, sample_rate_hz,
     return count, peak_sum, duration_sum, peak_min, peak_max, pri_sum, pri_count, have_prev, prev_start
 
 
-@njit(cache=True)
+@njit(cache=True, fastmath=True)
 def deinterleave_events(ev_start, ev_peak, sample_rate_hz, pri_tolerance_seconds,
                          track_count, next_track_id,
                          track_id, track_pulse_count, track_last_start,

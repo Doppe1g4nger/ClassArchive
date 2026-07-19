@@ -13,9 +13,10 @@
 // scripts/verify_avx_variant.sh for the measured numbers, not just the
 // claim).
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <vector>
 
 #include "deinterleaver.h"
 #include "iq_source.h"
@@ -24,6 +25,7 @@
 #include "pulse_detector_avx.h"
 #include "pulse_stats.h"
 #include "spectrogram.h"
+#include "threaded_pipeline.h"
 
 int main(int argc, char** argv) {
   // Default of 1000 pulses matches every other build in this repo.
@@ -39,31 +41,34 @@ int main(int argc, char** argv) {
   pulsecore::PulseStatsAccumulator stats_accumulator(kSampleRateHz);
   pulsecore::Deinterleaver deinterleaver(kSampleRateHz, /*pri_tolerance_seconds=*/1e-7);
 
-  // Reused across iterations for the same reason monolith_main.cpp's
-  // frame is.
-  pulse::PipelineFrame frame;
-  int batches = 0;
+  // Theoretical-limits branch: same stage-per-thread pipeline as
+  // monolith_main.cpp (see threaded_pipeline.h), same 4-thread grouping
+  // for the same 4-core reasons -- just direct calls instead of module
+  // function pointers.
+  std::vector<pulse::PipelineFrame> slots(8);
+  std::vector<std::function<void(pulse::PipelineFrame*)>> stages = {
+      [&](pulse::PipelineFrame* f) {
+        f->mutable_events()->Clear();
+        detector.Process(f->iq(), f->mutable_events());
+      },
+      [&](pulse::PipelineFrame* f) { spectrogram.Process(f->iq(), f->mutable_spectrogram()); },
+      [&](pulse::PipelineFrame* f) { jammer.Process(f->iq(), f->mutable_jam()); },
+      [&](pulse::PipelineFrame* f) {
+        stats_accumulator.Add(f->events());
+        *f->mutable_stats() = stats_accumulator.Finalize();
+        deinterleaver.Process(f->events(), f->mutable_deinterleave());
+      },
+  };
 
-  // Timed region covers only the batch-processing loop, same convention
-  // as every other build in this repo.
-  const auto steady_state_start = std::chrono::steady_clock::now();
-  while (source.NextBatch(frame.mutable_iq())) {
-    frame.mutable_events()->Clear();
-    detector.Process(frame.iq(), frame.mutable_events());
-    spectrogram.Process(frame.iq(), frame.mutable_spectrogram());
-    jammer.Process(frame.iq(), frame.mutable_jam());
-    stats_accumulator.Add(frame.events());
-    *frame.mutable_stats() = stats_accumulator.Finalize();
-    deinterleaver.Process(frame.events(), frame.mutable_deinterleave());
-    ++batches;
-  }
-  const auto steady_state_end = std::chrono::steady_clock::now();
-  const double steady_state_ms =
-      std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count();
+  // Timed region covers only the pipeline run, same convention as every
+  // other build in this repo.
+  const monolith::ThreadedPipelineResult run =
+      monolith::RunThreadedPipeline(&source, stages, &slots);
+  const pulse::PipelineFrame& frame = *run.final_frame;
 
   std::printf("[avx_monolith_app] processed %d IQ batches through 2 AVX2 kernels + 3 scalar stages\n",
-              batches);
-  std::printf("[avx_monolith_app] STEADY_STATE_MS %.6f\n", steady_state_ms);
+              run.batches);
+  std::printf("[avx_monolith_app] STEADY_STATE_MS %.6f\n", run.steady_state_ms);
 
   const pulse::SpectrogramSummary& spec = frame.spectrogram();
   std::printf("[avx_monolith_app] spectrogram: %d bins, %.1f Hz spacing, %llu frames\n",

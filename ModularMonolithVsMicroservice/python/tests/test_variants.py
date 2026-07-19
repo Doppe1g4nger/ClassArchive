@@ -47,6 +47,19 @@ except ImportError:  # pragma: no cover
 SAMPLE_RATE_HZ = 10_000_000.0
 NUM_PULSES = 3000  # a few full batches, small enough for unit-test time
 
+# Theoretical-limits branch: the numba kernels compile fastmath=True
+# (see numba_variant/kernels.py's docstring), so their parity with the
+# pure-Python reference is within-tolerance rather than bit-for-bit --
+# the same 1e-12-relative contract the C++ tests adopted when that side
+# went -ffast-math. Counts, indices, and track structure stay exact;
+# only accumulated doubles get the tolerance.
+REL_TOL = 1e-12
+
+
+def assert_close(tc, a, b):
+    tc.assertLessEqual(abs(a - b), REL_TOL * max(abs(a), abs(b), 1.0),
+                       f"{a!r} !~ {b!r}")
+
 
 def reference_batches():
     """Yields (IQBatch, i_array, q_array, idx_array) per batch of the
@@ -78,8 +91,8 @@ class TestNumbaKernelParity(unittest.TestCase):
             cursor += n
             first = batch.first_sample_index
             for k in (0, 1, n // 2, n - 1):
-                self.assertEqual(batch.i[k], i_arr[k])
-                self.assertEqual(batch.q[k], q_arr[k])
+                assert_close(self, batch.i[k], i_arr[k])
+                assert_close(self, batch.q[k], q_arr[k])
                 self.assertEqual(first + k, idx_arr[k])
 
     def test_detector_bit_identical_including_straddle(self):
@@ -95,9 +108,9 @@ class TestNumbaKernelParity(unittest.TestCase):
             for k in range(len(expected.start_sample)):
                 self.assertEqual(expected.start_sample[k], ev_start[k])
                 self.assertEqual(expected.end_sample[k], ev_end[k])
-                self.assertEqual(expected.peak_amplitude[k], ev_peak[k])
-                self.assertEqual(expected.mean_amplitude[k], ev_mean[k])
-                self.assertEqual(expected.duration_seconds[k], ev_dur[k])
+                assert_close(self, expected.peak_amplitude[k], ev_peak[k])
+                assert_close(self, expected.mean_amplitude[k], ev_mean[k])
+                assert_close(self, expected.duration_seconds[k], ev_dur[k])
 
     def test_spectrogram_bit_identical(self):
         num_bins = 8
@@ -114,8 +127,8 @@ class TestNumbaKernelParity(unittest.TestCase):
             )
             frames += 1
         for b in range(num_bins):
-            self.assertEqual(out.max_magnitude[b], max_mag[b])
-            self.assertEqual(out.mean_magnitude[b], sum_mag[b] / frames)
+            assert_close(self, out.max_magnitude[b], max_mag[b])
+            assert_close(self, out.mean_magnitude[b], sum_mag[b] / frames)
 
     def test_jammer_bit_identical(self):
         ref = JammerDetector(power_threshold=20.0, duty_cycle_threshold=0.5)
@@ -125,7 +138,7 @@ class TestNumbaKernelParity(unittest.TestCase):
             ref.process(batch, out)
             power_sum, over = numba_kernels.jammer_power(i, q, 20.0)
             max_mean_power = max(max_mean_power, power_sum / len(i))
-        self.assertEqual(out.max_mean_power, max_mean_power)
+        assert_close(self, out.max_mean_power, max_mean_power)
 
     def test_stats_bit_identical(self):
         from pulsecore.pulse_stats import PulseStatsAccumulator
@@ -147,11 +160,11 @@ class TestNumbaKernelParity(unittest.TestCase):
         summary = ref_acc.finalize()
         count, peak_sum, duration_sum, peak_min, peak_max, pri_sum, pri_count = st[:7]
         self.assertEqual(summary.pulse_count, count)
-        self.assertEqual(summary.mean_peak_amplitude, peak_sum / count)
-        self.assertEqual(summary.mean_duration_seconds, duration_sum / count)
-        self.assertEqual(summary.min_peak_amplitude, peak_min)
-        self.assertEqual(summary.max_peak_amplitude, peak_max)
-        self.assertEqual(summary.mean_pri_seconds, pri_sum / pri_count)
+        assert_close(self, summary.mean_peak_amplitude, peak_sum / count)
+        assert_close(self, summary.mean_duration_seconds, duration_sum / count)
+        assert_close(self, summary.min_peak_amplitude, peak_min)
+        assert_close(self, summary.max_peak_amplitude, peak_max)
+        assert_close(self, summary.mean_pri_seconds, pri_sum / pri_count)
 
     def test_deinterleaver_bit_identical(self):
         from pulsecore.deinterleaver import Deinterleaver
@@ -188,8 +201,8 @@ class TestNumbaKernelParity(unittest.TestCase):
             ref_track = ref_out.tracks[t]
             self.assertEqual(ref_track.track_id, t_id[t])
             self.assertEqual(ref_track.pulse_count, t_pulses[t])
-            self.assertEqual(ref_track.estimated_pri_seconds, t_pri_sum[t] / t_pri_count[t])
-            self.assertEqual(ref_track.mean_peak_amplitude, t_peak[t] / t_pulses[t])
+            assert_close(self, ref_track.estimated_pri_seconds, t_pri_sum[t] / t_pri_count[t])
+            assert_close(self, ref_track.mean_peak_amplitude, t_peak[t] / t_pulses[t])
 
 
 @unittest.skipUnless(np is not None and numpy_kernels is not None, "numpy not installed")

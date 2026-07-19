@@ -25,21 +25,29 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 
 # Theoretical-limits branch: compile every C++ target for the exact CPU
-# this machine has (-march=native) instead of generic x86-64 -- newer
-# ISA extensions, better scheduling, cheaper moves. The catch: native
-# makes FMA available, and GCC's default -ffp-contract=fast would then
-# silently fuse a*b+c into one single-rounding FMA wherever it liked,
-# changing results in the stages whose cross-build bit-exactness this
-# repo's whole verification story rests on. So contraction is forced
-# off globally, and re-enabled below ONLY for spectrogram.cpp, the one
-# file whose reductions are tolerance-gated rather than bit-exact.
-# (pulsecore_avx already pins -ffp-contract=off explicitly -- its
-# claim is "same bits as scalar", see verify_avx_variant.)
+# this machine has (-march=native), and -- second round -- with full
+# -ffast-math. This is the formal end of the repo's bit-exactness
+# guarantee: FMA contraction, reassociated reductions, and vectorized
+# math are now allowed everywhere, including the synthetic source, so
+# every build's output is verified against the references within
+# tolerance (relative 1e-6 on printed values) instead of byte-for-byte.
+# The signal's structure is unaffected -- pulses sit ~6x above the
+# detection threshold, so last-ulp amplitude wobble cannot flip a
+# threshold crossing, which is what makes "same events, same counts,
+# values within tolerance" the honest contract here. What fast-math
+# actually buys on top of the previous round's per-file reassociation
+# is measured in the README banner; the flag that matters most is
+# letting the *detector's* amplitude loop and the source's generator
+# loop vectorize, which bit-exactness previously forbade.
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
 if(COMPILER_SUPPORTS_MARCH_NATIVE)
-  add_compile_options(-march=native -ffp-contract=off)
+  add_compile_options(-march=native)
 endif()
+add_compile_options(-ffast-math)
+
+# The threaded monolith pipeline (monolith/include/threaded_pipeline.h).
+find_package(Threads REQUIRED)
 
 # Put every binary (executables and plugin .so's) in one directory so
 # monolith_app can find its plugins next to itself with no extra setup.
@@ -85,19 +93,10 @@ add_library(pulsecore STATIC
   common/src/deinterleaver.cpp
 )
 set_target_properties(pulsecore PROPERTIES POSITION_INDEPENDENT_CODE ON)
-# Max-optimization branch: let the compiler vectorize the spectrogram's
-# correlator reduction. GCC will not vectorize a floating-point sum at
-# -O3 without permission to reassociate it; these flags grant exactly
-# that (plus AVX2/FMA codegen) for this ONE file, whose reductions are
-# already tolerance-gated rather than bit-exact on this branch (the
-# phase-table rework reassociated them first -- see spectrogram.cpp).
-# Not applied target-wide: the detector/stats/deinterleaver stay
-# bit-exact, and their sums must not reassociate.
-# (-ffp-contract=fast last so it overrides the global contract=off --
-# this file's reductions are tolerance-gated, so FMA fusion is fair
-# game here and nowhere else.)
-set_source_files_properties(common/src/spectrogram.cpp PROPERTIES
-  COMPILE_OPTIONS "-mavx2;-mfma;-fassociative-math;-fno-signed-zeros;-fno-trapping-math;-ffp-contract=fast")
+# (The max-optimization branch granted reassociation/AVX2/FMA to
+# spectrogram.cpp alone via per-file flags; the global
+# -march=native -ffast-math above now covers every file, so the
+# per-file carve-out is gone.)
 target_include_directories(pulsecore PUBLIC common/include)
 target_link_libraries(pulsecore PUBLIC pulse_proto)
 
@@ -126,7 +125,7 @@ target_link_libraries(pulse_deinterleaver_plugin PRIVATE pulsecore)
 
 add_executable(monolith_app monolith/host/monolith_main.cpp)
 target_include_directories(monolith_app PRIVATE monolith/include)
-target_link_libraries(monolith_app PRIVATE pulsecore ${CMAKE_DL_LIBS})
+target_link_libraries(monolith_app PRIVATE pulsecore ${CMAKE_DL_LIBS} Threads::Threads)
 
 # ---------------------------------------------------------------------------
 # AVX2 variant: a fourth C++ build, answering "optimize further with AVX
@@ -157,17 +156,15 @@ if(COMPILER_SUPPORTS_AVX2_FMA)
   set_target_properties(pulsecore_avx PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(pulsecore_avx PUBLIC common/include)
   target_link_libraries(pulsecore_avx PUBLIC pulse_proto)
-  # -ffp-contract=off: stop the compiler from silently fusing
-  # pulse_detector_avx.cpp's separate multiply+add into one FMA
-  # instruction -- that fusion rounds once instead of twice and would
-  # break the detector's bit-identical guarantee. jammer_avx.cpp uses
-  # FMA explicitly via intrinsics regardless of this flag (its output
-  # isn't bit-identical to begin with -- see jammer_avx.h).
-  target_compile_options(pulsecore_avx PRIVATE -mavx2 -mfma -ffp-contract=off)
+  # (Earlier rounds pinned -ffp-contract=off here to keep the AVX
+  # detector bit-identical to the scalar one. The global -ffast-math
+  # retires that guarantee -- scalar-vs-AVX parity is now tolerance-
+  # gated like everything else, see verify_avx_variant.)
+  target_compile_options(pulsecore_avx PRIVATE -mavx2 -mfma)
 
   add_executable(avx_monolith_app monolith/host/avx_monolith_main.cpp)
   target_include_directories(avx_monolith_app PRIVATE monolith/include)
-  target_link_libraries(avx_monolith_app PRIVATE pulsecore pulsecore_avx)
+  target_link_libraries(avx_monolith_app PRIVATE pulsecore pulsecore_avx Threads::Threads)
 
   add_executable(verify_avx_variant monolith/host/verify_avx_variant_main.cpp)
   target_link_libraries(verify_avx_variant PRIVATE pulsecore pulsecore_avx)

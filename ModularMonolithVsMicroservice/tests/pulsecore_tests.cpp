@@ -53,15 +53,26 @@ int failures = 0;
     }                                                                   \
   } while (0)
 
-#define CHECK_EQ_D(a, b)                                                \
-  do {                                                                  \
-    const double va = (a);                                              \
-    const double vb = (b);                                              \
-    if (va != vb) {                                                     \
-      ++failures;                                                       \
-      std::fprintf(stderr, "FAIL %s:%d: %s == %s  (%.17g vs %.17g)\n",  \
-                   __FILE__, __LINE__, #a, #b, va, vb);                 \
-    }                                                                   \
+// Theoretical-limits branch: equality within 1e-12 *relative*, not
+// bit-exact. The branch compiles everything -ffast-math, which permits
+// FMA contraction and reassociation everywhere -- including the
+// synthetic source -- so golden values and cross-implementation
+// comparisons now land within a few ulps of the pinned doubles instead
+// of on them. 1e-12 is ~4 orders of magnitude looser than the observed
+// drift (~1e-16 relative) and ~6 tighter than anything the pipeline's
+// printed 3-decimal output could ever show; exact zero still compares
+// exactly (the absolute floor below only forgives sub-1e-12 noise).
+#define CHECK_EQ_D(a, b)                                                    \
+  do {                                                                      \
+    const double va = (a);                                                  \
+    const double vb = (b);                                                  \
+    const double diff = std::fabs(va - vb);                                 \
+    const double scale = std::max(std::fabs(va), std::fabs(vb));            \
+    if (diff > 1e-12 * std::max(scale, 1.0)) {                              \
+      ++failures;                                                           \
+      std::fprintf(stderr, "FAIL %s:%d: %s ~= %s  (%.17g vs %.17g)\n",      \
+                   __FILE__, __LINE__, #a, #b, va, vb);                     \
+    }                                                                       \
   } while (0)
 
 constexpr double kSampleRateHz = 10000000.0;
@@ -453,6 +464,23 @@ void TestFramingRoundTrip() {
 // ---------------------------------------------------------------------------
 
 #ifdef HAVE_AVX_VARIANT
+// Same events, same boundaries; per-event doubles within CHECK_EQ_D's
+// tolerance. (Pre-fast-math this test compared serialized bytes; under
+// global -ffast-math the scalar and AVX builds may contract/reassociate
+// differently, so byte equality is no longer the right claim -- see the
+// CHECK_EQ_D comment.)
+void CheckEventBatchesMatch(const pulse::PulseEventBatch& a, const pulse::PulseEventBatch& b) {
+  CHECK(a.start_sample_size() == b.start_sample_size());
+  if (a.start_sample_size() != b.start_sample_size()) return;
+  for (int k = 0; k < a.start_sample_size(); ++k) {
+    CHECK(a.start_sample(k) == b.start_sample(k));
+    CHECK(a.end_sample(k) == b.end_sample(k));
+    CHECK_EQ_D(a.peak_amplitude(k), b.peak_amplitude(k));
+    CHECK_EQ_D(a.mean_amplitude(k), b.mean_amplitude(k));
+    CHECK_EQ_D(a.duration_seconds(k), b.duration_seconds(k));
+  }
+}
+
 void TestAvxDetectorMatchesScalarExactly() {
   pulsecore::PulseDetector scalar(6.0, kSampleRateHz);
   pulsecore::PulseDetectorAvx avx(6.0, kSampleRateHz);
@@ -463,7 +491,7 @@ void TestAvxDetectorMatchesScalarExactly() {
     pulse::PulseEventBatch b;
     scalar.Process(batch, &a);
     avx.Process(batch, &b);
-    CHECK(a.SerializeAsString() == b.SerializeAsString());
+    CheckEventBatchesMatch(a, b);
   }
 
   // And on a straddling pulse (batch length deliberately not a
@@ -478,7 +506,7 @@ void TestAvxDetectorMatchesScalarExactly() {
   scalar2.Process(second, &a);
   avx2.Process(first, &b);
   avx2.Process(second, &b);
-  CHECK(a.SerializeAsString() == b.SerializeAsString());
+  CheckEventBatchesMatch(a, b);
 }
 
 void TestAvxJammerMatchesScalarWithinTolerance() {
