@@ -48,7 +48,11 @@ Channel* Accept(Channel* listen_channel);
 Channel* Connect(const std::string& host, uint16_t port);
 
 // Both return false on a closed/failed channel, mirroring the TCP
-// versions' semantics.
+// versions' semantics. Because a dead peer can't break a shm ring the
+// way it breaks a socket, every blocking wait also carries a ~30s
+// deadline and returns false on expiry -- otherwise a crashed neighbor
+// would leave this process spinning forever (see framing.cpp's
+// Deadline for the measured incident behind this).
 bool SendMessage(Channel* ch, const std::string& payload);
 bool RecvMessage(Channel* ch, std::string* payload);
 

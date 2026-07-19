@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -49,6 +50,29 @@ inline void WaitPause(int& spins) {
     ::sched_yield();
   }
 }
+
+// A shm ring has no kernel connection to break: if a peer dies, TCP's
+// RST/EOF never arrives and a blocking spin would just yield forever,
+// invisibly burning a core. That's not hypothetical -- a detector crash
+// during benchmarking left the four downstream services spinning at
+// ~80% CPU each and quietly poisoned every measurement taken after.
+// So every blocking wait carries a deadline generous beyond any
+// legitimate stall at this repo's scale (whole pipeline runs take
+// milliseconds; startup, seconds) and gives up cleanly -- the caller
+// treats it exactly like a peer close.
+constexpr int64_t kWaitTimeoutMs = 30000;
+
+struct Deadline {
+  std::chrono::steady_clock::time_point end =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(kWaitTimeoutMs);
+  int checks = 0;
+  bool Expired() {
+    // Clock reads are ~20ns but the spin iterates millions of times;
+    // checking every 1024th iteration keeps the wait loop cheap.
+    if ((++checks & 1023) != 0) return false;
+    return std::chrono::steady_clock::now() >= end;
+  }
+};
 
 }  // namespace
 
@@ -145,7 +169,14 @@ Channel* Connect(const std::string& /*host*/, uint16_t port) {
 
   auto* hdr = static_cast<RingHeader*>(mem);
   int spins = 0;
-  while (hdr->magic != kMagic) WaitPause(spins);
+  Deadline deadline;
+  while (hdr->magic != kMagic) {
+    if (deadline.Expired()) {
+      ::munmap(mem, kRingBytes);
+      return nullptr;
+    }
+    WaitPause(spins);
+  }
   std::atomic_thread_fence(std::memory_order_acquire);
 
   auto* ch = new Channel();
@@ -163,7 +194,9 @@ bool SendMessage(Channel* ch, const std::string& payload) {
 
   const uint64_t head = h->head.load(std::memory_order_relaxed);
   int spins = 0;
+  Deadline deadline;
   while (head - h->tail.load(std::memory_order_acquire) >= kSlotCount) {
+    if (deadline.Expired()) return false;  // consumer stopped draining: treat as peer gone
     WaitPause(spins);
   }
 
@@ -181,11 +214,13 @@ bool RecvMessage(Channel* ch, std::string* payload) {
 
   const uint64_t tail = h->tail.load(std::memory_order_relaxed);
   int spins = 0;
+  Deadline deadline;
   while (tail == h->head.load(std::memory_order_acquire)) {
     if (h->writer_done.load(std::memory_order_acquire) != 0 &&
         tail == h->head.load(std::memory_order_acquire)) {
       return false;  // drained and producer closed: end of stream
     }
+    if (deadline.Expired()) return false;  // producer died without its FIN: treat as peer close
     WaitPause(spins);
   }
 
