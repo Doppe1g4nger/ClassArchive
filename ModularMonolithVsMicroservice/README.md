@@ -73,6 +73,82 @@
 > capture-the-wire teaching prop. `-march=native` binaries aren't
 > portable across CPU generations. This branch is the speed ceiling of
 > this architecture on this machine, not a recommendation.
+>
+> ---
+>
+> ### Round two: thread the monolith, retire bit-exactness
+>
+> Two constraints survived round one: the monolith stayed
+> single-threaded (the main branch's charter -- threading its stages
+> turns it into the very thing it's compared against) and every
+> non-gated stage stayed bit-exact. Both are now gone.
+>
+> - **Stage-per-thread monolith**
+>   (`monolith/include/threaded_pipeline.h`, wired into both monolith
+>   apps): the five modules run as a pipeline over a ring of eight
+>   preallocated frames -- generation+detector fused on the producer
+>   thread (the chain fuses them into detector_service for the same
+>   reason), spectrogram and jammer a thread each, stats+deinterleaver
+>   sharing the fourth thread to match the box's four cores. Every
+>   stage still sees every batch, in order, from one thread, so all
+>   running state stays lock-free and per-stage arithmetic is
+>   untouched; the only synchronization is one release-store/
+>   acquire-load pair per stage per batch. This is the chain's pipeline
+>   parallelism without the chain's serialize/parse toll -- and it's
+>   worth exactly 2x: monolith median 9.2ms -> **4.3ms**.
+> - **Global `-ffast-math` (C++) / `fastmath=True` (numba)**: the
+>   formal end of the repo's bit-exactness guarantee. FMA contraction,
+>   reassociation, and vectorized math are allowed everywhere,
+>   including the synthetic source; every gate that asserted byte or
+>   bit equality now asserts a tolerance instead (unit tests at 1e-12
+>   relative; verify_avx_variant's detector at 1e-9 with event counts
+>   and sample boundaries still exact). Measured drift: ~4e-16
+>   relative, worst case, across every gate -- and every build's
+>   printed output is still *character-identical* to the pre-branch
+>   references, because 3-decimal output can't see femto-scale wobble.
+>   The honest ledger, though: fast-math alone moved **no** headline
+>   number (the C++ stages are memory- and dependency-bound, and numba
+>   sat flat at 22ms) -- the win of this round is the threading;
+>   fast-math just stopped charging rent for a guarantee nobody was
+>   using.
+> - **Two ring-transport bugs, caught by the benchmark itself** and
+>   kept here as the robustness bill for leaving TCP: (1) `Connect()`
+>   could mmap the segment in the window between the consumer's
+>   `shm_open(O_CREAT)` and its `ftruncate`, then SIGBUS on first
+>   touch of the still-zero-sized mapping -- fixed by waiting for the
+>   segment to reach full size. (2) A dead peer can't break a ring the
+>   way it breaks a socket -- no RST, no EOF -- so that SIGBUS crash
+>   left the four downstream services yield-spinning at ~80% CPU each
+>   and silently inflated every number measured after them, until a
+>   too-good-to-be-true numba regression gave the game away. Every
+>   blocking wait now carries a ~30s give-up deadline. TCP users never
+>   see either failure because the kernel owns socket lifecycle; a shm
+>   ring's lifecycle is yours, including its funerals.
+>
+> Final steady-state medians (20x50k, same machine, single run):
+>
+> | build | round 1 | round 2 | |
+> |---|---:|---:|---|
+> | C++ monolith | 9.2ms | **4.3ms** | 2.1x -- the threading |
+> | C++ monolith (AVX2) | 9.2ms | **4.6ms** | same pipeline win |
+> | C++ microservices | 11.5ms | 10.6ms | ~flat: its parallelism *is* its process boundaries |
+> | Python numba | 21.9ms | 22.0ms | fastmath: nothing measurable |
+> | Python numpy | 99.1ms | 107.8ms | untouched code; run-to-run drift |
+> | Python mono / micro / multiproc | 713 / 380 / 377ms | 808 / 437 / 460ms | untouched code; run-to-run drift |
+>
+> That closes the ledger. The monolith ends 2.4x ahead of the chain:
+> handed the same pipeline parallelism the chain gets from its process
+> boundaries, it keeps the parallelism and drops the serialization, so
+> the chain's only remaining edge -- overlap -- is gone, and its only
+> remaining cost -- serialize/parse per hop -- is not. Methods still on
+> no table: threading the *Python* monolith (the GIL forecloses it
+> in-process; the multiproc build already is that experiment, and its
+> numbers are above), float32 (its ~1e-7 precision collides with this
+> pipeline's 1e-7-second PRI tolerance, risking track-structure changes
+> -- a results change, not a tolerance change), and GPU offload (a
+> different repo, not a rounding of this one). Everything else priced
+> across five optimization rounds is either applied above or measured,
+> reverted, and written down as a negative result.
 
 > ## ⚡ Inherited: the `claude/max-optimization` banner
 >
