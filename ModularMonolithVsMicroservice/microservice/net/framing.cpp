@@ -1,141 +1,193 @@
 #include "framing.h"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/socket.h>
-#include <sys/uio.h>
+#include <fcntl.h>
+#include <sched.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 
 namespace netutil {
 
 namespace {
 
-void SetNoDelay(int fd) {
-  // Disable Nagle's algorithm. This example only ever has one message in
-  // flight at a time per direction, so without this a small write (like
-  // the 4-byte length prefix, were it sent separately) can sit buffered
-  // for up to ~40ms waiting to be coalesced with more outgoing data that
-  // never comes. Cheap to set, and standard practice for latency-sensitive
-  // socket code.
-  const int one = 1;
-  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+// Sized so the largest frame this repo produces (~200KB serialized
+// packed PipelineFrame with iq + events) fits with headroom, times
+// enough slots to keep the pipeline from stalling on a briefly slow
+// consumer. 4 slots x 512KB = 2MB per link; four links = 8MB of shm.
+constexpr uint32_t kSlotSize = 512 * 1024;
+constexpr uint32_t kSlotCount = 4;  // power of two
+constexpr uint32_t kMagic = 0x50524E47;  // "PRNG" -- pulse ring
+
+struct RingHeader {
+  uint32_t magic;
+  uint32_t slot_size;
+  uint32_t slot_count;
+  alignas(64) std::atomic<uint64_t> head;         // producer-owned
+  alignas(64) std::atomic<uint64_t> tail;         // consumer-owned
+  alignas(64) std::atomic<uint32_t> writer_done;  // producer's FIN
+};
+
+constexpr size_t kRingBytes = sizeof(RingHeader) + size_t(kSlotCount) * kSlotSize;
+
+void RingName(uint16_t port, char* out, size_t out_len) {
+  std::snprintf(out, out_len, "/pulse_ring_%u", static_cast<unsigned>(port));
 }
 
-bool ReadFull(int fd, void* buf, size_t len) {
-  auto* p = static_cast<uint8_t*>(buf);
-  size_t remaining = len;
-  while (remaining > 0) {
-    const ssize_t n = ::recv(fd, p, remaining, 0);
-    if (n <= 0) return false;  // 0 = peer closed, <0 = error
-    p += n;
-    remaining -= static_cast<size_t>(n);
+// Brief spin for the common fast case, then yield the core -- five
+// processes share four cores in this repo's benchmark, so hogging a
+// core while waiting would slow the very stage being waited on.
+inline void WaitPause(int& spins) {
+  if (++spins < 256) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#endif
+  } else {
+    ::sched_yield();
   }
-  return true;
 }
 
 }  // namespace
 
-int Listen(uint16_t port) {
-  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
+struct Channel {
+  RingHeader* hdr = nullptr;
+  uint8_t* slots = nullptr;
+  uint16_t port = 0;
+  bool is_producer = false;
+  bool closed = false;
+};
 
-  const int one = 1;
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+Channel* Listen(uint16_t port) {
+  char name[64];
+  RingName(port, name, sizeof(name));
 
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = INADDR_ANY;
-  addr.sin_port = htons(port);
-
-  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+  // Replace any stale segment from a crashed previous run, then create
+  // fresh -- the consumer owns the segment's lifecycle.
+  ::shm_unlink(name);
+  const int fd = ::shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
+  if (fd < 0) return nullptr;
+  if (::ftruncate(fd, static_cast<off_t>(kRingBytes)) != 0) {
     ::close(fd);
-    return -1;
+    ::shm_unlink(name);
+    return nullptr;
   }
-  if (::listen(fd, /*backlog=*/1) < 0) {
-    ::close(fd);
-    return -1;
+  void* mem = ::mmap(nullptr, kRingBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  ::close(fd);
+  if (mem == MAP_FAILED) {
+    ::shm_unlink(name);
+    return nullptr;
   }
-  return fd;
+
+  auto* hdr = new (mem) RingHeader();
+  hdr->slot_size = kSlotSize;
+  hdr->slot_count = kSlotCount;
+  hdr->head.store(0, std::memory_order_relaxed);
+  hdr->tail.store(0, std::memory_order_relaxed);
+  hdr->writer_done.store(0, std::memory_order_relaxed);
+  // magic last, with release: a connecting producer that sees the magic
+  // is guaranteed to see the initialized fields above.
+  hdr->magic = 0;
+  std::atomic_thread_fence(std::memory_order_release);
+  hdr->magic = kMagic;
+
+  auto* ch = new Channel();
+  ch->hdr = hdr;
+  ch->slots = static_cast<uint8_t*>(mem) + sizeof(RingHeader);
+  ch->port = port;
+  ch->is_producer = false;
+  return ch;
 }
 
-int Accept(int listen_fd) {
-  const int fd = ::accept(listen_fd, nullptr, nullptr);
-  if (fd >= 0) SetNoDelay(fd);
-  return fd;
+Channel* Accept(Channel* listen_channel) { return listen_channel; }
+
+Channel* Connect(const std::string& /*host*/, uint16_t port) {
+  char name[64];
+  RingName(port, name, sizeof(name));
+
+  // Wait for the consumer to create the segment -- bounded so a
+  // mis-wired chain still fails visibly instead of hanging forever.
+  int fd = -1;
+  for (int attempt = 0; attempt < 20000; ++attempt) {  // ~20s worst case
+    fd = ::shm_open(name, O_RDWR, 0600);
+    if (fd >= 0) break;
+    ::usleep(1000);
+  }
+  if (fd < 0) return nullptr;
+
+  void* mem = ::mmap(nullptr, kRingBytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  ::close(fd);
+  if (mem == MAP_FAILED) return nullptr;
+
+  auto* hdr = static_cast<RingHeader*>(mem);
+  int spins = 0;
+  while (hdr->magic != kMagic) WaitPause(spins);
+  std::atomic_thread_fence(std::memory_order_acquire);
+
+  auto* ch = new Channel();
+  ch->hdr = hdr;
+  ch->slots = static_cast<uint8_t*>(mem) + sizeof(RingHeader);
+  ch->port = port;
+  ch->is_producer = true;
+  return ch;
 }
 
-int Connect(const std::string& host, uint16_t port) {
-  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0) return -1;
+bool SendMessage(Channel* ch, const std::string& payload) {
+  if (ch == nullptr || ch->closed) return false;
+  if (payload.size() + sizeof(uint32_t) > kSlotSize) return false;
+  RingHeader* h = ch->hdr;
 
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(port);
-  if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    ::close(fd);
-    return -1;
+  const uint64_t head = h->head.load(std::memory_order_relaxed);
+  int spins = 0;
+  while (head - h->tail.load(std::memory_order_acquire) >= kSlotCount) {
+    WaitPause(spins);
   }
 
-  if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    ::close(fd);
-    return -1;
-  }
-  SetNoDelay(fd);
-  return fd;
-}
-
-bool SendMessage(int fd, const std::string& payload) {
-  const uint32_t len_be = htonl(static_cast<uint32_t>(payload.size()));
-
-  // Header and payload go out as one writev() call instead of two send()
-  // calls. Besides halving the syscall count, this guarantees the kernel
-  // never sees the 4-byte header as a complete, sendable unit on its own
-  // -- with TCP_NODELAY that distinction rarely matters, but it removes
-  // any chance of the header and payload being flushed as two separate
-  // TCP segments.
-  iovec iov[2];
-  iov[0].iov_base = const_cast<uint32_t*>(&len_be);
-  iov[0].iov_len = sizeof(len_be);
-  iov[1].iov_base = const_cast<char*>(payload.data());
-  iov[1].iov_len = payload.size();
-
-  size_t remaining = iov[0].iov_len + iov[1].iov_len;
-  int iov_start = 0;
-  int iov_count = 2;
-  while (remaining > 0) {
-    const ssize_t n = ::writev(fd, iov + iov_start, iov_count);
-    if (n <= 0) return false;
-    remaining -= static_cast<size_t>(n);
-
-    // Almost always finishes in one call on loopback; this loop only
-    // matters if the kernel ever accepts a partial write.
-    size_t consumed = static_cast<size_t>(n);
-    while (consumed > 0) {
-      const size_t take = std::min(consumed, iov[iov_start].iov_len);
-      iov[iov_start].iov_base = static_cast<uint8_t*>(iov[iov_start].iov_base) + take;
-      iov[iov_start].iov_len -= take;
-      consumed -= take;
-      if (iov[iov_start].iov_len == 0 && iov_count > 1) {
-        ++iov_start;
-        --iov_count;
-      }
-    }
-  }
+  uint8_t* slot = ch->slots + (head & (kSlotCount - 1)) * size_t(kSlotSize);
+  const uint32_t len = static_cast<uint32_t>(payload.size());
+  std::memcpy(slot, &len, sizeof(len));
+  std::memcpy(slot + sizeof(len), payload.data(), len);
+  h->head.store(head + 1, std::memory_order_release);
   return true;
 }
 
-bool RecvMessage(int fd, std::string* payload) {
-  uint32_t len_be = 0;
-  if (!ReadFull(fd, &len_be, sizeof(len_be))) return false;
+bool RecvMessage(Channel* ch, std::string* payload) {
+  if (ch == nullptr || ch->closed) return false;
+  RingHeader* h = ch->hdr;
 
-  const uint32_t len = ntohl(len_be);
-  payload->resize(len);
-  if (len == 0) return true;
-  return ReadFull(fd, payload->data(), len);
+  const uint64_t tail = h->tail.load(std::memory_order_relaxed);
+  int spins = 0;
+  while (tail == h->head.load(std::memory_order_acquire)) {
+    if (h->writer_done.load(std::memory_order_acquire) != 0 &&
+        tail == h->head.load(std::memory_order_acquire)) {
+      return false;  // drained and producer closed: end of stream
+    }
+    WaitPause(spins);
+  }
+
+  const uint8_t* slot = ch->slots + (tail & (kSlotCount - 1)) * size_t(kSlotSize);
+  uint32_t len = 0;
+  std::memcpy(&len, slot, sizeof(len));
+  payload->assign(reinterpret_cast<const char*>(slot + sizeof(len)), len);
+  h->tail.store(tail + 1, std::memory_order_release);
+  return true;
+}
+
+void Close(Channel* ch) {
+  if (ch == nullptr || ch->closed) return;
+  ch->closed = true;
+  if (ch->is_producer) {
+    ch->hdr->writer_done.store(1, std::memory_order_release);
+    ::munmap(ch->hdr, kRingBytes);
+  } else {
+    char name[64];
+    RingName(ch->port, name, sizeof(name));
+    ::munmap(ch->hdr, kRingBytes);
+    ::shm_unlink(name);
+  }
+  delete ch;
 }
 
 }  // namespace netutil

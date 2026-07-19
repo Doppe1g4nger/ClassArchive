@@ -13,8 +13,6 @@
 // before forwarding instead of being serialized and transmitted two more
 // times for no reason.
 
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -33,23 +31,23 @@ int main(int argc, char** argv) {
 
   std::printf("[jammer_service] connecting to stats_service at %s:%u\n", next_host.c_str(),
               next_port);
-  const int downstream_fd = netutil::Connect(next_host, next_port);
-  if (downstream_fd < 0) {
+  netutil::Channel* downstream = netutil::Connect(next_host, next_port);
+  if (downstream == nullptr) {
     std::fprintf(stderr, "[jammer_service] failed to connect (is stats_service running?)\n");
     return 1;
   }
 
-  const int listen_fd = netutil::Listen(listen_port);
-  if (listen_fd < 0) {
+  netutil::Channel* listener = netutil::Listen(listen_port);
+  if (listener == nullptr) {
     std::fprintf(stderr, "[jammer_service] failed to listen on port %u\n", listen_port);
     return 1;
   }
   std::printf(
-      "[jammer_service] listening on 127.0.0.1:%u, waiting for spectrogram_service...\n",
+      "[jammer_service] listening on shm ring %u, waiting for spectrogram_service...\n",
       listen_port);
 
-  const int upstream_fd = netutil::Accept(listen_fd);
-  if (upstream_fd < 0) {
+  netutil::Channel* upstream = netutil::Accept(listener);
+  if (upstream == nullptr) {
     std::fprintf(stderr, "[jammer_service] accept failed\n");
     return 1;
   }
@@ -70,7 +68,7 @@ int main(int argc, char** argv) {
   std::chrono::steady_clock::time_point steady_state_start;
   std::chrono::steady_clock::time_point steady_state_end;
   bool started = false;
-  while (netutil::RecvMessage(upstream_fd, &payload)) {
+  while (netutil::RecvMessage(upstream, &payload)) {
     if (!started) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
@@ -112,7 +110,7 @@ int main(int argc, char** argv) {
     frame.mutable_jam()->Clear();
 
     frame.SerializeToString(&payload);
-    if (!netutil::SendMessage(downstream_fd, payload)) {
+    if (!netutil::SendMessage(downstream, payload)) {
       std::fprintf(stderr, "[jammer_service] forward failed, stats_service may have exited\n");
       break;
     }
@@ -124,7 +122,7 @@ int main(int argc, char** argv) {
           ? std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count()
           : 0.0;
 
-  std::printf("[jammer_service] received/forwarded %d frame(s) over TCP\n", frames_forwarded);
+  std::printf("[jammer_service] received/forwarded %d frame(s) via shm ring\n", frames_forwarded);
   std::printf("[jammer_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
   std::printf(
       "[jammer_service] %llu/%llu batches flagged, max_duty_cycle=%.3f max_mean_power=%.2f\n",
@@ -132,8 +130,7 @@ int main(int argc, char** argv) {
       static_cast<unsigned long long>(last_summary.batches_total()), last_summary.max_duty_cycle(),
       last_summary.max_mean_power());
 
-  ::close(upstream_fd);
-  ::close(downstream_fd);
-  ::close(listen_fd);
+  netutil::Close(upstream);  // == listener; consumer side unlinks the ring
+  netutil::Close(downstream);
   return 0;
 }

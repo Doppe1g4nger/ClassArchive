@@ -91,6 +91,23 @@ wait_for_port() {
   return 1
 }
 
+# The C++ chain's transport is a shared-memory ring, not TCP (see
+# microservice/net/framing.h), so readiness means "the listener has
+# created its /dev/shm segment", not "a port shows up in /proc/net/tcp".
+# Connect() would also wait on its own (it polls shm_open for up to
+# ~20s), so this is about preserving the reverse-order startup the
+# steady-state measurement's comments rely on, not correctness.
+wait_for_ring() {
+  local port="$1"
+  for attempt in $(seq 1 100); do
+    if [ -e "/dev/shm/pulse_ring_${port}" ]; then
+      return 0
+    fi
+    sleep 0.02
+  done
+  return 1
+}
+
 echo "Benchmarking steady-state throughput: $RUNS runs each, $NUM_PULSES pulses per run"
 echo
 
@@ -126,16 +143,16 @@ for i in $(seq 1 "$RUNS"); do
   # discarded the same way the old benchmark did.
   "$BIN/deinterleave_service" "$port_deinterleave" >"$SINK_OUT" 2>&1 &
   pid_d=$!
-  wait_for_port "$port_deinterleave"
+  wait_for_ring "$port_deinterleave"
   "$BIN/stats_service" "$port_stats" 127.0.0.1 "$port_deinterleave" >/dev/null 2>&1 &
   pid_s=$!
-  wait_for_port "$port_stats"
+  wait_for_ring "$port_stats"
   "$BIN/jammer_service" "$port_jammer" 127.0.0.1 "$port_stats" >/dev/null 2>&1 &
   pid_j=$!
-  wait_for_port "$port_jammer"
+  wait_for_ring "$port_jammer"
   "$BIN/spectrogram_service" "$port_spectrogram" 127.0.0.1 "$port_jammer" >/dev/null 2>&1 &
   pid_sp=$!
-  wait_for_port "$port_spectrogram"
+  wait_for_ring "$port_spectrogram"
   "$BIN/detector_service" 127.0.0.1 "$port_spectrogram" "$NUM_PULSES" >/dev/null
   wait "$pid_sp" "$pid_j" "$pid_s" "$pid_d"
 

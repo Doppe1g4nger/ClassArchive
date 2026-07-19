@@ -17,8 +17,6 @@
 // scripts/benchmark_steady_state.sh for how this number gets compared
 // against monolith_main.cpp's equivalent measurement.
 
-#include <unistd.h>
-
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -33,16 +31,16 @@ int main(int argc, char** argv) {
   constexpr double kSampleRateHz = 10000000.0;
   constexpr double kPriToleranceSeconds = 1e-7;
 
-  const int listen_fd = netutil::Listen(listen_port);
-  if (listen_fd < 0) {
+  netutil::Channel* listener = netutil::Listen(listen_port);
+  if (listener == nullptr) {
     std::fprintf(stderr, "[deinterleave_service] failed to listen on port %u\n", listen_port);
     return 1;
   }
-  std::printf("[deinterleave_service] listening on 127.0.0.1:%u, waiting for stats_service...\n",
+  std::printf("[deinterleave_service] listening on shm ring %u, waiting for stats_service...\n",
               listen_port);
 
-  const int upstream_fd = netutil::Accept(listen_fd);
-  if (upstream_fd < 0) {
+  netutil::Channel* upstream = netutil::Accept(listener);
+  if (upstream == nullptr) {
     std::fprintf(stderr, "[deinterleave_service] accept failed\n");
     return 1;
   }
@@ -61,7 +59,7 @@ int main(int argc, char** argv) {
   std::chrono::steady_clock::time_point steady_state_start;
   std::chrono::steady_clock::time_point steady_state_end;
   bool started = false;
-  while (netutil::RecvMessage(upstream_fd, &payload)) {
+  while (netutil::RecvMessage(upstream, &payload)) {
     if (!started) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
@@ -84,7 +82,7 @@ int main(int argc, char** argv) {
           ? std::chrono::duration<double, std::milli>(steady_state_end - steady_state_start).count()
           : 0.0;
 
-  std::printf("[deinterleave_service] received %d frame(s) over TCP, end of chain\n",
+  std::printf("[deinterleave_service] received %d frame(s) via shm ring, end of chain\n",
               frames_received);
   std::printf("[deinterleave_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
   std::printf("[deinterleave_service] %d track(s)\n", frame.deinterleave().tracks_size());
@@ -95,7 +93,6 @@ int main(int argc, char** argv) {
         track.estimated_pri_seconds() * 1e6, track.mean_peak_amplitude());
   }
 
-  ::close(upstream_fd);
-  ::close(listen_fd);
+  netutil::Close(upstream);  // == listener; consumer side unlinks the ring
   return 0;
 }

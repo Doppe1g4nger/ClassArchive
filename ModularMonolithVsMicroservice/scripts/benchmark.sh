@@ -38,12 +38,13 @@ done
 echo "done"
 echo
 
-wait_for_port() {
+# Readiness = "the listener created its /dev/shm ring segment" -- the
+# chain's transport is a shared-memory ring, not TCP, on this branch
+# (see microservice/net/framing.h).
+wait_for_ring() {
   local port="$1"
-  local port_hex
-  port_hex=$(printf '%04X' "$port")
   for attempt in $(seq 1 100); do
-    if awk -v p=":${port_hex}" '$2 ~ p && $4=="0A" {found=1} END{exit !found}' /proc/net/tcp; then
+    if [ -e "/dev/shm/pulse_ring_${port}" ]; then
       return 0
     fi
     sleep 0.02
@@ -72,24 +73,24 @@ for i in $(seq 1 "$RUNS"); do
 
   # Each middle service connects downstream before it can accept
   # upstream, so startup order is the reverse of data flow (same
-  # constraint as scripts/run_microservices.sh). Each wait_for_port call
+  # constraint as scripts/run_microservices.sh). Each wait_for_ring call
   # is itself counted as part of the microservice architecture's cost:
   # it's synchronization overhead the monolith never pays.
   "$BIN/deinterleave_service" "$port_deinterleave" >/dev/null 2>&1 &
   pid_deinterleave=$!
-  wait_for_port "$port_deinterleave"
+  wait_for_ring "$port_deinterleave"
 
   "$BIN/stats_service" "$port_stats" 127.0.0.1 "$port_deinterleave" >/dev/null 2>&1 &
   pid_stats=$!
-  wait_for_port "$port_stats"
+  wait_for_ring "$port_stats"
 
   "$BIN/jammer_service" "$port_jammer" 127.0.0.1 "$port_stats" >/dev/null 2>&1 &
   pid_jammer=$!
-  wait_for_port "$port_jammer"
+  wait_for_ring "$port_jammer"
 
   "$BIN/spectrogram_service" "$port_spectrogram" 127.0.0.1 "$port_jammer" >/dev/null 2>&1 &
   pid_spectrogram=$!
-  wait_for_port "$port_spectrogram"
+  wait_for_ring "$port_spectrogram"
 
   "$BIN/detector_service" 127.0.0.1 "$port_spectrogram" "$NUM_PULSES" >/dev/null
   wait "$pid_spectrogram" "$pid_jammer" "$pid_stats" "$pid_deinterleave"

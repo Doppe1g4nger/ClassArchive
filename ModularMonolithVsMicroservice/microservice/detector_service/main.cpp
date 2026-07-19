@@ -4,10 +4,8 @@
 // spectrogram -> jammer -> stats -> deinterleaver): it's the chain's pure
 // producer, so it never listens -- it generates the synthetic IQ stream,
 // runs detection locally, and connects out to spectrogram_service (the
-// next stage) as a plain TCP client, streaming one serialized
-// PipelineFrame per batch.
-
-#include <unistd.h>
+// next stage) as the producer end of its shm ring (see net/framing.h),
+// streaming one serialized PipelineFrame per batch.
 
 #include <chrono>
 #include <cstdio>
@@ -28,8 +26,8 @@ int main(int argc, char** argv) {
 
   std::printf("[detector_service] connecting to spectrogram_service at %s:%u\n", next_host.c_str(),
               next_port);
-  const int downstream_fd = netutil::Connect(next_host, next_port);
-  if (downstream_fd < 0) {
+  netutil::Channel* downstream = netutil::Connect(next_host, next_port);
+  if (downstream == nullptr) {
     std::fprintf(stderr,
                   "[detector_service] failed to connect (is spectrogram_service running?)\n");
     return 1;
@@ -61,9 +59,9 @@ int main(int argc, char** argv) {
     detector.Process(frame.iq(), frame.mutable_events());
 
     frame.SerializeToString(&payload);
-    if (!netutil::SendMessage(downstream_fd, payload)) {
+    if (!netutil::SendMessage(downstream, payload)) {
       std::fprintf(stderr, "[detector_service] send failed, spectrogram_service may have exited\n");
-      ::close(downstream_fd);
+      netutil::Close(downstream);
       return 1;
     }
     ++batches_sent;
@@ -74,6 +72,6 @@ int main(int argc, char** argv) {
 
   std::printf("[detector_service] streamed %d frame(s) into the chain, closing\n", batches_sent);
   std::printf("[detector_service] STEADY_STATE_MS %.6f\n", steady_state_ms);
-  ::close(downstream_fd);
+  netutil::Close(downstream);
   return 0;
 }

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Builds (if needed) and runs the microservice variant: five separate
-# executables wired as a linear chain over TCP with length-prefixed
-# protobuf messages -- detector_service -> spectrogram_service ->
-# jammer_service -> stats_service -> deinterleave_service. The first
+# executables wired as a linear chain over shared-memory rings carrying
+# length-prefixed protobuf messages (see microservice/net/framing.h --
+# this branch replaces the TCP transport) -- detector_service ->
+# spectrogram_service -> jammer_service -> stats_service ->
+# deinterleave_service. The first
 # three all read the raw IQ batch, so they're grouped together and each
 # hop after jammer_service drops it from the frame before forwarding
 # (see microservice/jammer_service/main.cpp) -- the point being to avoid
@@ -47,17 +49,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-wait_for_port() {
+# Readiness = "the listener created its /dev/shm ring segment" (the
+# transport is shared memory, not TCP -- see microservice/net/framing.h,
+# which names each segment /pulse_ring_<port>). Connect() also waits on
+# its own, so this only preserves the reverse-order startup story below.
+wait_for_ring() {
   local port="$1"
-  local port_hex
-  port_hex=$(printf '%04X' "$port")
   for attempt in $(seq 1 100); do
-    if awk -v p=":${port_hex}" '$2 ~ p && $4=="0A" {found=1} END{exit !found}' /proc/net/tcp; then
+    if [ -e "/dev/shm/pulse_ring_${port}" ]; then
       return 0
     fi
     sleep 0.02
   done
-  echo "timed out waiting for port $port to start listening" >&2
+  echo "timed out waiting for ring $port to be created" >&2
   return 1
 }
 
@@ -65,19 +69,19 @@ wait_for_port() {
 # already be listening before it starts.
 "$BIN/deinterleave_service" "$PORT_DEINTERLEAVE" &
 PIDS+=("$!")
-wait_for_port "$PORT_DEINTERLEAVE"
+wait_for_ring "$PORT_DEINTERLEAVE"
 
 "$BIN/stats_service" "$PORT_STATS" 127.0.0.1 "$PORT_DEINTERLEAVE" &
 PIDS+=("$!")
-wait_for_port "$PORT_STATS"
+wait_for_ring "$PORT_STATS"
 
 "$BIN/jammer_service" "$PORT_JAMMER" 127.0.0.1 "$PORT_STATS" &
 PIDS+=("$!")
-wait_for_port "$PORT_JAMMER"
+wait_for_ring "$PORT_JAMMER"
 
 "$BIN/spectrogram_service" "$PORT_SPECTROGRAM" 127.0.0.1 "$PORT_JAMMER" &
 PIDS+=("$!")
-wait_for_port "$PORT_SPECTROGRAM"
+wait_for_ring "$PORT_SPECTROGRAM"
 
 "$BIN/detector_service" 127.0.0.1 "$PORT_SPECTROGRAM" "$NUM_PULSES"
 

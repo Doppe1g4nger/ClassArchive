@@ -1,5 +1,5 @@
 // Unit tests for pulsecore (the shared business logic) and netutil (the
-// TCP framing layer), plus -- when the toolchain built them -- the AVX2
+// shared-memory ring transport), plus -- when the toolchain built them -- the AVX2
 // variant classes. Deliberately framework-free: a tiny CHECK macro and a
 // main() that counts failures keeps the repo's dependency footprint at
 // zero, which matters more for a teaching repo than gtest's ergonomics
@@ -387,48 +387,65 @@ void TestSpectrogramRunningState() {
 // ---------------------------------------------------------------------------
 
 void TestFramingRoundTrip() {
-  int fds[2];
-  CHECK(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+  // The transport is a shared-memory ring, so both ends can live in one
+  // process: Listen() creates+maps the segment as the consumer end,
+  // Connect() maps that same segment as the producer end. Same bytes,
+  // same atomics as the cross-process case -- just two Channel handles
+  // onto one mapping. Port chosen away from the pipeline's 50052-50055
+  // range so a test run can't collide with a live chain.
+  const uint16_t port = 59999;
+  netutil::Channel* consumer = netutil::Listen(port);
+  CHECK(consumer != nullptr);
+  // Accept() is a no-op alias for the ring (the segment IS the
+  // connection); the services rely on that identity when they Close().
+  CHECK(netutil::Accept(consumer) == consumer);
+  netutil::Channel* producer = netutil::Connect("127.0.0.1", port);
+  CHECK(producer != nullptr);
 
   // Ordinary payload.
   std::string sent(1000, '\0');
   for (size_t k = 0; k < sent.size(); ++k) sent[k] = static_cast<char>(k % 251);
-  CHECK(netutil::SendMessage(fds[0], sent));
+  CHECK(netutil::SendMessage(producer, sent));
   std::string received;
-  CHECK(netutil::RecvMessage(fds[1], &received));
+  CHECK(netutil::RecvMessage(consumer, &received));
   CHECK(received == sent);
 
-  // Empty payload is legal (4-byte header, zero body).
-  CHECK(netutil::SendMessage(fds[0], std::string()));
-  CHECK(netutil::RecvMessage(fds[1], &received));
+  // Empty payload is legal (4-byte length word, zero body).
+  CHECK(netutil::SendMessage(producer, std::string()));
+  CHECK(netutil::RecvMessage(consumer, &received));
   CHECK(received.empty());
 
-  // A payload bigger than typical socket buffers exercises the partial
-  // read/write loops.
-  std::string big(1 << 20, 'x');
-  bool send_ok = false;
-  bool recv_ok = false;
-  // Send from a child so a full pipe can't deadlock the single test
-  // process.
-  const pid_t pid = ::fork();
-  if (pid == 0) {
-    const bool ok = netutil::SendMessage(fds[0], big);
-    ::_exit(ok ? 0 : 1);
-  }
-  recv_ok = netutil::RecvMessage(fds[1], &received);
-  int status = 0;
-  ::waitpid(pid, &status, 0);
-  send_ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-  CHECK(send_ok);
-  CHECK(recv_ok);
+  // A payload the size of the largest frame the pipeline actually
+  // produces (~200KB serialized packed iq+events) fits one slot.
+  std::string big(200 * 1024, 'x');
+  CHECK(netutil::SendMessage(producer, big));
+  CHECK(netutil::RecvMessage(consumer, &received));
   CHECK(received == big);
 
-  // Closing the writer makes the reader's next RecvMessage fail
-  // cleanly (peer-closed), which is how every service detects
-  // end-of-stream.
-  ::close(fds[0]);
-  CHECK(!netutil::RecvMessage(fds[1], &received));
-  ::close(fds[1]);
+  // A payload no slot can hold is rejected outright rather than
+  // truncated -- the ring's one hard capacity limit, documented in
+  // framing.h.
+  CHECK(!netutil::SendMessage(producer, std::string(600 * 1024, 'y')));
+
+  // Fill every slot, then drain: messages come back in send order.
+  for (int k = 0; k < 4; ++k) {
+    CHECK(netutil::SendMessage(producer, std::string(1, static_cast<char>('a' + k))));
+  }
+  for (int k = 0; k < 4; ++k) {
+    CHECK(netutil::RecvMessage(consumer, &received));
+    CHECK(received == std::string(1, static_cast<char>('a' + k)));
+  }
+
+  // Closing the producer raises the writer_done flag; the consumer
+  // still drains anything queued ahead of it, then RecvMessage returns
+  // false -- how every service detects end-of-stream (the ring's
+  // equivalent of reading EOF off a closed socket).
+  CHECK(netutil::SendMessage(producer, sent));
+  netutil::Close(producer);
+  CHECK(netutil::RecvMessage(consumer, &received));
+  CHECK(received == sent);
+  CHECK(!netutil::RecvMessage(consumer, &received));
+  netutil::Close(consumer);  // consumer side unlinks the segment
 }
 
 // ---------------------------------------------------------------------------

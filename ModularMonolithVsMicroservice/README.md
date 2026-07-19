@@ -1,6 +1,80 @@
 # Modular Monolith vs. Microservices — a minimum viable comparison
 
-> ## ⚡ This is the `claude/max-optimization` branch
+> ## 🏁 This is the `claude/theoretical-limits` branch
+>
+> Built on `claude/max-optimization` (whose banner follows below and
+> whose changes are all inherited), this branch applies the last
+> methods that branch priced and declined -- the ones that trade
+> teaching props for speed. The five algorithms, the synthetic signal
+> (bit-for-bit), and every printed *result* are still identical; what's
+> gone is the wire itself:
+>
+> - **Shared-memory ring transport for the C++ chain**
+>   (`microservice/net/framing.{h,cpp}`): each link is now a
+>   single-producer/single-consumer ring in a `shm_open` segment
+>   instead of a TCP socket. The same serialized `PipelineFrame` bytes
+>   that used to cross the socket are memcpy'd into a mapped slot, so
+>   every service's parse/serialize logic is untouched; a "send" is a
+>   memcpy plus one release-store, a "receive" is the mirror image, and
+>   there are **zero syscalls on the data path**. The API deliberately
+>   mirrors the TCP one (Listen/Accept/Connect/Send/Recv, keyed by the
+>   same port numbers, which now name `/dev/shm/pulse_ring_<port>`), so
+>   the reverse-order startup invariant the steady-state measurement
+>   leans on carries over unchanged, and end-of-stream is a writer-done
+>   flag where TCP used FIN. Waits spin briefly then `sched_yield()` --
+>   five processes share four cores here, and a pure busy-spin would
+>   fight the very pipeline it's carrying.
+> - **`-march=native` globally**, with `-ffp-contract=off` pinned:
+>   native makes FMA available, and GCC's default contraction would
+>   silently fuse `a*b+c` into one rounding and break the bit-exact
+>   stages the verification story rests on. Contraction stays enabled
+>   only for the one tolerance-gated file (spectrogram.cpp).
+>
+> Applied, measured, and **reverted** -- kept as a negative result: the
+> C++ port of numpy's GF(2) jump-ahead RNG vectorization. Bit-identical
+> output, but 11.8ms vs 8.8ms monolith median -- a regression. The C++
+> scalar generator loop was already compiled, inline, and running at
+> memory speed; the lane-staging and grid transposition the jump-ahead
+> needs cost more than the sequential dependency they removed. numpy
+> won with the same trick because it was escaping the *interpreter*,
+> not the dependency chain. The revert is the lesson: the identical
+> optimization, applied to the identical algorithm, flips sign with the
+> language runtime.
+>
+> Correctness gates unchanged from max-opt: monolith and AVX printed
+> outputs diff byte-identical against the pre-branch references; the
+> chain's results are value-identical (its log lines now say
+> `via shm ring` and the transport-status wording changed -- data lines
+> match exactly); all 42 unit tests pass, including a rewritten framing
+> round-trip test that exercises the ring's slot-capacity bound and
+> drain-after-close semantics; both verify tools pass.
+>
+> Steady-state medians (20x50k, same machine), max-opt -> this branch:
+>
+> | build | max-opt | theoretical-limits | |
+> |---|---:|---:|---|
+> | C++ microservices | 14.9ms | **11.5ms** | 1.3x -- and min dropped 12.5 -> 7.1ms, *below* the monolith's |
+> | C++ monolith | 8.8ms | 9.2ms | flat (memory-bound; `-march=native` had nothing to sell it) |
+> | C++ monolith (AVX2) | 8.7ms | 9.2ms | flat |
+> | Python builds | -- | unchanged | this branch touches only the C++ chain + flags |
+>
+> The chain's min undercutting the monolith's is the branch's headline:
+> with transport near-free, the five processes genuinely overlap their
+> stages (pipeline parallelism across cores), something the monolith's
+> single thread structurally can't do -- the chain's remaining ~2ms
+> median gap over its own min is scheduling jitter from five processes
+> on four cores, not boundary cost. This is the "boundary cost
+> approaches zero" endpoint the main README priced from the start: the
+> architecture penalty was never the process count, it was the wire.
+>
+> What was traded to get here (why main/max-opt declined it): shm rings
+> only work on one host, so the cross-host scaling story -- the actual
+> reason to choose microservices -- is gone, along with the
+> capture-the-wire teaching prop. `-march=native` binaries aren't
+> portable across CPU generations. This branch is the speed ceiling of
+> this architecture on this machine, not a recommendation.
+
+> ## ⚡ Inherited: the `claude/max-optimization` banner
 >
 > The main branch optimizes under two self-imposed constraints: the wire
 > schema is frozen, and every change must keep all builds' outputs

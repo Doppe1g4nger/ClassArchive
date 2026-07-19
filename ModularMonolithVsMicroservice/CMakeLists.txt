@@ -24,6 +24,23 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   endif()
 endif()
 
+# Theoretical-limits branch: compile every C++ target for the exact CPU
+# this machine has (-march=native) instead of generic x86-64 -- newer
+# ISA extensions, better scheduling, cheaper moves. The catch: native
+# makes FMA available, and GCC's default -ffp-contract=fast would then
+# silently fuse a*b+c into one single-rounding FMA wherever it liked,
+# changing results in the stages whose cross-build bit-exactness this
+# repo's whole verification story rests on. So contraction is forced
+# off globally, and re-enabled below ONLY for spectrogram.cpp, the one
+# file whose reductions are tolerance-gated rather than bit-exact.
+# (pulsecore_avx already pins -ffp-contract=off explicitly -- its
+# claim is "same bits as scalar", see verify_avx_variant.)
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-march=native" COMPILER_SUPPORTS_MARCH_NATIVE)
+if(COMPILER_SUPPORTS_MARCH_NATIVE)
+  add_compile_options(-march=native -ffp-contract=off)
+endif()
+
 # Put every binary (executables and plugin .so's) in one directory so
 # monolith_app can find its plugins next to itself with no extra setup.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -76,8 +93,11 @@ set_target_properties(pulsecore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # phase-table rework reassociated them first -- see spectrogram.cpp).
 # Not applied target-wide: the detector/stats/deinterleaver stay
 # bit-exact, and their sums must not reassociate.
+# (-ffp-contract=fast last so it overrides the global contract=off --
+# this file's reductions are tolerance-gated, so FMA fusion is fair
+# game here and nowhere else.)
 set_source_files_properties(common/src/spectrogram.cpp PROPERTIES
-  COMPILE_OPTIONS "-mavx2;-mfma;-fassociative-math;-fno-signed-zeros;-fno-trapping-math")
+  COMPILE_OPTIONS "-mavx2;-mfma;-fassociative-math;-fno-signed-zeros;-fno-trapping-math;-ffp-contract=fast")
 target_include_directories(pulsecore PUBLIC common/include)
 target_link_libraries(pulsecore PUBLIC pulse_proto)
 
