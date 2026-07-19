@@ -22,7 +22,7 @@ anything through protobuf, so nothing is. IQ samples flow from
 generate_batch's output arrays through every stage as arrays.
 """
 import numpy as np
-from numba import njit
+from numba import njit, prange
 
 _UINT32_MAX = np.float64(0xFFFFFFFF)
 
@@ -119,19 +119,24 @@ def detect_pulses(i_arr, q_arr, idx_arr, threshold_sq, sample_rate_hz,
             ev_dur[:n_events], in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count)
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def spectrogram_bins(i_arr, q_arr, first_sample_index, sample_rate_hz, num_bins, bin_hz,
                       max_magnitude, sum_magnitude):
     """JIT-compiled port of spectrogram.py's process() loop -- same
     phasor-rotation recursion per bin, same sequential re/im
-    accumulation, so it needs the same "read i/q once, not once per bin"
-    fix spectrogram.py itself needed (see that module for why): done
-    once by the caller, not here, since these arrays are already the
-    per-batch extraction shared with detect_pulses/jammer_power above."""
+    accumulation within each bin. The *bins* run in parallel (prange):
+    each bin's correlator is fully independent -- its own phasor, its
+    own accumulators, its own output slots -- so threading them changes
+    nothing about any bin's operation order, and the output stays
+    bit-identical to the sequential version (enforced by the parity
+    tests, same as every other kernel here). This was the numba build's
+    largest remaining kernel by profile; parallel=True costs a
+    per-call thread handoff, which the before/after numbers in the
+    README weigh against the win."""
     n = i_arr.shape[0]
     pi = 3.14159265358979323846
 
-    for b in range(num_bins):
+    for b in prange(num_bins):
         freq_hz = (b + 0.5) * bin_hz
         omega = 2.0 * pi * freq_hz / sample_rate_hz
 

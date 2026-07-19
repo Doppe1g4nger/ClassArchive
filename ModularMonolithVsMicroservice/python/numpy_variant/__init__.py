@@ -13,13 +13,12 @@ verify_numpy_variant.py for the actual measured tolerance.
 
 pulse_stats and the deinterleaver are reused from pulsecore as-is: they
 run over the much smaller `events` list (~1,000/batch, not 10,000
-samples). With the RNG now vectorized too (GF(2) jump-ahead -- see
-iq_source_arrays.py), cProfile puts this variant's remaining cost in
-per-*event* work: the detector kernel's two tiny-array reductions per
-detected pulse (~100k numpy calls per 50k-pulse run -- np.ufunc.reduceat
-over the pulse boundaries would be the next fix, if one were wanted),
-plus these two pure-Python stages and the protobuf event rebuild that
-feeds them. (numba_variant crossed the equivalent threshold and jitted
-its stats/deinterleaver; this variant's kernels are still slow enough
-that doing the same here would buy proportionally less.)
+samples). After four rounds of measured fixes (protobuf round-trip
+removed, GF(2) jump-ahead RNG, reduceat event aggregation, cached
+phase tables -- see kernels.py and iq_source_arrays.py), those two
+pure-Python stages plus the protobuf event rebuild that feeds them ARE
+this variant's remaining floor. Fixing that would mean either jitting
+them (numba_variant's answer -- but then this variant stops being "what
+numpy alone can do") or duplicating their algorithms as app-local array
+code; both were judged worse than stating the floor honestly.
 """

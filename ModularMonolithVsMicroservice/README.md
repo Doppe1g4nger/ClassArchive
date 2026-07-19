@@ -1752,12 +1752,58 @@ median back-to-back (~1.2x). That's real but smaller than the ~330ms
 the round-2 cProfile attributed to the loop -- profiler overhead
 inflates per-iteration loop costs, a measurement caveat worth naming.
 Post-change profiling shows the RNG gone from the profile entirely; the
-variant's floor is now per-*event* work (the detector kernel's two
-tiny-array reductions per detected pulse -- `np.ufunc.reduceat` over
-the pulse boundaries would be the next fix if one were wanted) plus the
-pure-Python stats/deinterleaver stages. The bottleneck has now moved
-three times in this one variant, each move measured, which is about as
-clean an illustration of iterative profiling as this repo has to offer.
+variant's floor moved to per-*event* work -- which the next round then
+attacked (below). The bottleneck has now moved four times in this one
+variant, each move measured, which is about as clean an illustration of
+iterative profiling as this repo has to offer.
+
+### The next batch: reduceat events, cached phase tables, prange bins
+
+One more reprofile-then-fix cycle, three changes, all
+verification-gated:
+
+1. **`detect_pulses` fully vectorized via `np.ufunc.reduceat`** (numpy
+   variant). The per-event Python loop made two tiny-array reductions
+   per detected pulse -- ~100k numpy calls per run, the kernel's
+   dominant cost. Interleaving the rising/falling edge indices gives
+   reduceat boundaries where every even-indexed segment is a pulse:
+   two reduceat calls now aggregate *every* in-batch pulse's peak and
+   sum. Exactness was validated empirically before adopting, and the
+   finding is worth recording: `np.maximum.reduceat` reduces strictly
+   sequentially (peaks stay exact for any input), but `np.add.reduceat`
+   reassociates sums from segment length 3 -- and the *previous* code's
+   `seg.sum()` already reassociated from length 8, so the detector's
+   "exact" claim was always silently conditional on short pulses. The
+   docstring now states the real contract: everything exact except
+   per-event `mean_amplitude` for pulses of 3+ samples -- a field
+   nothing downstream reads, invisible in every build's output, and
+   exact anyway for this repo's 2-sample pulses (the verify tool's
+   exact event comparison still passes unchanged).
+2. **Cached per-bin phase tables** (numpy variant). The spectrogram
+   recomputed `cos`/`sin` over 80,000 points per batch; the absolute
+   phase `omega*(first+k)` factors into a per-batch scalar phasor times
+   a batch-shape-constant offset table, so the transcendentals now
+   happen once per batch *shape* (two shapes exist: 10,000 and 8).
+   One extra rounding step per element (a complex multiply), and the
+   measured error vs. the scalar reference actually *improved* -- from
+   3.0e-11 to 1.5e-12 worst-case -- because small-argument cos/sin
+   avoids the precision the direct evaluation loses reducing arguments
+   like `omega*500000`.
+3. **`prange` over spectrogram bins** (numba variant). The 8 bins are
+   fully independent correlators, so threading them (numba
+   `parallel=True`) changes no bin's operation order -- bit-identity
+   enforced by the existing parity tests. 31.6ms -> 24.2ms median
+   back-to-back.
+
+Net, back-to-back: **numpy 462ms -> 192ms median** (2.4x this round;
+within-run, 7.8x faster than the Python monolith, where round 2 left it
+at 2.0x), **numba 31.6ms -> 24.2ms** -- now faster than everything in
+the repo except the two C++ monoliths, C++ chain included. All 42 unit
+tests, both verify tools, and the cross-build output diffs pass
+unchanged; the fresh 8-way run confirming these standings is in the
+git history alongside this change (absolute numbers that session ran
+~15% slow machine-wide -- the drift caveat above -- which is why the
+per-change numbers here are back-to-back pairs and within-run ratios).
 
 ## Tests
 
