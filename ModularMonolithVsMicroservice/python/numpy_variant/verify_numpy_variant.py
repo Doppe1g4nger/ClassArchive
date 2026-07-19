@@ -48,11 +48,9 @@ def check_straddling() -> bool:
     def make_batch(amplitudes, start_idx):
         b = pulse_pb2.IQBatch()
         b.sample_rate_hz = _SAMPLE_RATE_HZ
-        for k, amp in enumerate(amplitudes):
-            s = b.samples.add()
-            s.sample_index = start_idx + k
-            s.i = amp
-            s.q = 0.0
+        b.first_sample_index = start_idx
+        b.i.extend(amplitudes)
+        b.q.extend([0.0] * len(amplitudes))
         return b
 
     batch1_amps = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 20.0, 21.0, 22.0]
@@ -65,8 +63,9 @@ def check_straddling() -> bool:
     ref.process(batch1, ref_events)
     ref.process(batch2, ref_events)
     ref_result = [
-        (e.start_sample, e.end_sample, e.peak_amplitude, e.mean_amplitude, e.duration_seconds)
-        for e in ref_events.events
+        (ref_events.start_sample[k], ref_events.end_sample[k], ref_events.peak_amplitude[k],
+         ref_events.mean_amplitude[k], ref_events.duration_seconds[k])
+        for k in range(len(ref_events.start_sample))
     ]
 
     i1, q1, idx1 = np.array(batch1_amps), np.zeros(10), np.arange(0, 10, dtype=np.uint64)
@@ -125,13 +124,15 @@ def check_against_real_signal(num_pulses: int) -> bool:
             i_arr, q_arr, idx_arr, threshold_sq, _SAMPLE_RATE_HZ,
             in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_count,
         )
-        if len(ref_events.events) != len(ev_start):
+        if len(ref_events.start_sample) != len(ev_start):
             detector_exact = False
         else:
-            for k, e in enumerate(ref_events.events):
-                if (e.start_sample != ev_start[k] or e.end_sample != ev_end[k]
-                        or e.peak_amplitude != ev_peak[k] or e.mean_amplitude != ev_mean[k]
-                        or e.duration_seconds != ev_dur[k]):
+            for k in range(len(ref_events.start_sample)):
+                if (ref_events.start_sample[k] != ev_start[k]
+                        or ref_events.end_sample[k] != ev_end[k]
+                        or ref_events.peak_amplitude[k] != ev_peak[k]
+                        or ref_events.mean_amplitude[k] != ev_mean[k]
+                        or ref_events.duration_seconds[k] != ev_dur[k]):
                     detector_exact = False
 
         max_magnitude, sum_magnitude = kernels.spectrogram_bins(

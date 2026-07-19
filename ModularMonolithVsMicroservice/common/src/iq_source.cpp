@@ -29,13 +29,22 @@ bool SyntheticIQSource::NextBatch(pulse::IQBatch* batch) {
 
   batch->Clear();
   batch->set_sample_rate_hz(sample_rate_hz_);
+  batch->set_first_sample_index(sample_cursor_);
 
   const uint64_t period = kGapSamples + kPulseSamples;
   const int count = static_cast<int>(
       std::min<uint64_t>(kBatchSize, total_samples_ - sample_cursor_));
 
-  for (int i = 0; i < count; ++i) {
-    const uint64_t idx = sample_cursor_ + i;
+  // Packed columnar layout (see pulse.proto): size the two arrays once,
+  // then write through raw pointers -- no per-sample message allocation,
+  // no per-sample Add() bookkeeping.
+  batch->mutable_i()->Resize(count, 0.0);
+  batch->mutable_q()->Resize(count, 0.0);
+  double* i_out = batch->mutable_i()->mutable_data();
+  double* q_out = batch->mutable_q()->mutable_data();
+
+  for (int k = 0; k < count; ++k) {
+    const uint64_t idx = sample_cursor_ + k;
     const uint64_t phase = idx % period;
     const bool in_pulse = phase >= kGapSamples;
 
@@ -43,10 +52,8 @@ bool SyntheticIQSource::NextBatch(pulse::IQBatch* batch) {
     // Split amplitude evenly across I/Q so magnitude sqrt(i^2+q^2) == amplitude.
     const double component = amplitude / std::sqrt(2.0);
 
-    pulse::IQSample* s = batch->add_samples();
-    s->set_sample_index(idx);
-    s->set_i(component + NextNoise());
-    s->set_q(component + NextNoise());
+    i_out[k] = component + NextNoise();
+    q_out[k] = component + NextNoise();
   }
 
   sample_cursor_ += count;

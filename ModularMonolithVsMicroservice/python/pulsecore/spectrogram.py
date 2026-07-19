@@ -26,10 +26,9 @@ class SpectrogramAnalyzer:
         self._frame_count = 0
 
     def process(self, batch: "pulse_pb2.IQBatch", out: "pulse_pb2.SpectrogramSummary") -> None:
-        samples = batch.samples
-        n = len(samples)
+        n = len(batch.i)
         if n > 0:
-            first_sample_index = samples[0].sample_index
+            first_sample_index = batch.first_sample_index
 
             # Read every sample out of the protobuf message exactly once,
             # into plain Python complex numbers, instead of once per bin
@@ -50,7 +49,9 @@ class SpectrogramAnalyzer:
             # bytecode per sample without changing a single output bit.
             # cProfile put this loop at 51% of the whole monolith's
             # runtime, which is what made it worth this treatment.
-            samples_c = [complex(s.i, s.q) for s in samples]
+            # (Packed columnar layout: zip over two bulk list() copies
+            # of the packed arrays, no per-sample message access.)
+            samples_c = [complex(si, qi) for si, qi in zip(batch.i, batch.q)]
             max_magnitude = self._max_magnitude
             sum_magnitude = self._sum_magnitude
             cos = math.cos

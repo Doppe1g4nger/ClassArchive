@@ -31,6 +31,13 @@ class SpectrogramAnalyzer {
   std::vector<double> max_magnitude_;
   std::vector<double> sum_magnitude_;
   uint64_t frame_count_ = 0;
+
+  // Cached per-bin offset phasor tables e^{-j*omega*k}, rebuilt only
+  // when the batch length changes -- see Process() for the factoring
+  // that makes the per-batch work transcendental-free.
+  int table_n_ = -1;
+  std::vector<double> table_re_;
+  std::vector<double> table_im_;
 };
 
 }  // namespace pulsecore

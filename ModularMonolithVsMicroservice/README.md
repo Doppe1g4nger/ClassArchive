@@ -1,5 +1,67 @@
 # Modular Monolith vs. Microservices — a minimum viable comparison
 
+> ## ⚡ This is the `claude/max-optimization` branch
+>
+> The main branch optimizes under two self-imposed constraints: the wire
+> schema is frozen, and every change must keep all builds' outputs
+> byte-identical (or explicitly tolerance-gated). This branch answers
+> "how fast does it go when those constraints are lifted?" -- every
+> method with material measured impact, applied. The architecture, the
+> five algorithms, the synthetic signal (bit-for-bit), and all printed
+> outputs are unchanged; what changed is representation and codegen:
+>
+> - **Packed columnar schema** (`proto/pulse.proto`): `IQBatch` carries
+>   packed `i[]`/`q[]` arrays plus one `first_sample_index` instead of
+>   10,000 heap-allocated per-sample messages; `PulseEventBatch` is five
+>   parallel packed arrays. This one change removes the pointer-chasing
+>   the main branch's profiling identified as the C++ monolith's
+>   dominant L1d-miss source, makes parse/serialize memcpy-class, cuts
+>   the wire size ~40%, and gives every language contiguous arrays.
+> - **C++ spectrogram phase tables + compiler-vectorized reduction**
+>   (per-file `-fassociative-math -mavx2 -mfma` -- the reduction is
+>   tolerance-gated, everything else stays bit-exact and unflagged).
+> - **AVX2 kernels finally on contiguous data** -- direct vector loads
+>   replace the per-lane gather that capped them at scalar parity.
+> - **Python bulk transfers**: one `extend()` per array per batch in and
+>   out of protobuf, replacing every per-sample/per-event protobuf call.
+>
+> Correctness gates: all printed outputs diff identical against
+> reference outputs captured from the main branch immediately before
+> branching; all 42 unit tests (golden values unchanged -- same signal)
+> and both verify tools pass. Same-day, same-machine steady-state
+> medians (20x50k), main branch -> this branch:
+>
+> | build | main | max-opt | |
+> |---|---:|---:|---|
+> | C++ monolith | 20.2ms | **8.8ms** | 2.3x |
+> | C++ microservices | 43.6ms | **14.9ms** | 2.9x (now ~1.6x its monolith) |
+> | Python monolith | 1529.9ms | **711.9ms** | 2.1x |
+> | Python microservices | 868.5ms | **382.0ms** | 2.3x |
+> | Python multiproc | 942.6ms | **399.6ms** | 2.4x |
+> | Python numpy | 197.4ms | **97.7ms** | 2.0x |
+> | Python numba | 24.1ms | **24.0ms** | 1.0x (never touched protobuf) |
+>
+> numba's flat line is the branch's cleanest lesson: it was already
+> array-native end to end, so the schema change that roughly halved
+> everything else did nothing for it -- the entire branch is, in effect,
+> every other build catching up to the data layout numba chose on day
+> one.
+>
+> Methods evaluated and *not* applied, with reasons: Unix-domain or
+> shared-memory transport for the chain (the remaining chain-vs-monolith
+> gap is now ~5-6ms total; UDS would shave syscall overhead worth a
+> couple of ms at the cost of losing the cross-host TCP story, shm rings
+> would collapse transport entirely but replace the wire-format
+> demonstration this repo exists to make); global `-ffast-math`
+> (per-file reassociation where tolerance-gated captured the available
+> win without touching bit-exact stages); threading the C++ monolith's
+> stages (that's what the microservice chain *is* -- the comparison
+> would collapse into itself).
+>
+> Everything below this banner is the main branch's README, kept intact
+> as the history and rationale this branch builds on; per-file "packed
+> columnar layout" comments mark each site the schema change touched.
+
 A minimal, working C++ example that implements **the same signal-processing
 pipeline twice**, once as a modular monolith and once as a set of
 microservices, so the architectural trade-off is visible in code rather than

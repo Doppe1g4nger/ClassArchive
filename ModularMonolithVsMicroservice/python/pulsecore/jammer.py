@@ -14,15 +14,14 @@ class JammerDetector:
         self._max_mean_power = 0.0
 
     def process(self, batch: "pulse_pb2.IQBatch", out: "pulse_pb2.JamSummary") -> None:
-        samples = batch.samples
-        n = len(samples)
+        n = len(batch.i)
         if n > 0:
             power_threshold = self._power_threshold
             power_sum = 0.0
             over_threshold = 0
-            for s in samples:
-                si = s.i
-                sq = s.q
+            # Packed columnar layout: zip over the two packed arrays,
+            # no per-sample message access.
+            for si, sq in zip(batch.i, batch.q):
                 power = si * si + sq * sq
                 power_sum += power
                 if power >= power_threshold:

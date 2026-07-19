@@ -8,20 +8,24 @@ PulseStatsAccumulator::PulseStatsAccumulator(double sample_rate_hz)
     : sample_rate_hz_(sample_rate_hz) {}
 
 void PulseStatsAccumulator::Add(const pulse::PulseEventBatch& batch) {
-  for (const pulse::PulseEvent& e : batch.events()) {
+  // Columnar events (see pulse.proto): entry k across the parallel
+  // arrays is one pulse; iteration walks contiguous doubles.
+  const int n = batch.start_sample_size();
+  for (int k = 0; k < n; ++k) {
+    const double peak = batch.peak_amplitude(k);
     ++count_;
-    peak_sum_ += e.peak_amplitude();
-    duration_sum_ += e.duration_seconds();
-    peak_min_ = std::min(peak_min_, e.peak_amplitude());
-    peak_max_ = std::max(peak_max_, e.peak_amplitude());
+    peak_sum_ += peak;
+    duration_sum_ += batch.duration_seconds(k);
+    peak_min_ = std::min(peak_min_, peak);
+    peak_max_ = std::max(peak_max_, peak);
 
     if (have_prev_start_) {
       const double gap_samples =
-          static_cast<double>(e.start_sample() - prev_start_sample_);
+          static_cast<double>(batch.start_sample(k) - prev_start_sample_);
       pri_sum_ += gap_samples / sample_rate_hz_;
       ++pri_count_;
     }
-    prev_start_sample_ = e.start_sample();
+    prev_start_sample_ = batch.start_sample(k);
     have_prev_start_ = true;
   }
 }

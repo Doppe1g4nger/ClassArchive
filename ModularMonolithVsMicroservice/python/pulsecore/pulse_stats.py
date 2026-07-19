@@ -31,17 +31,22 @@ class PulseStatsAccumulator:
         prev_start_sample = self._prev_start_sample
         sample_rate_hz = self._sample_rate_hz
 
-        for e in batch.events:
+        # Columnar events (see pulse.proto): parallel arrays, bulk-copied
+        # out of protobuf once, then plain-list iteration.
+        starts = list(batch.start_sample)
+        peaks = list(batch.peak_amplitude)
+        durations = list(batch.duration_seconds)
+        for k in range(len(starts)):
             count += 1
-            peak_amplitude = e.peak_amplitude
+            peak_amplitude = peaks[k]
             peak_sum += peak_amplitude
-            duration_sum += e.duration_seconds
+            duration_sum += durations[k]
             if peak_amplitude < peak_min:
                 peak_min = peak_amplitude
             if peak_amplitude > peak_max:
                 peak_max = peak_amplitude
 
-            start_sample = e.start_sample
+            start_sample = starts[k]
             if have_prev_start:
                 pri_sum += (start_sample - prev_start_sample) / sample_rate_hz
                 pri_count += 1

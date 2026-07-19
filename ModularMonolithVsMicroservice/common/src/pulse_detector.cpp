@@ -10,9 +10,14 @@ PulseDetector::PulseDetector(double amplitude_threshold, double sample_rate_hz)
       sample_rate_hz_(sample_rate_hz) {}
 
 void PulseDetector::Process(const pulse::IQBatch& batch, pulse::PulseEventBatch* out) {
-  for (const pulse::IQSample& s : batch.samples()) {
-    const double i = s.i();
-    const double q = s.q();
+  const int n = batch.i_size();
+  const double* i_arr = batch.i().data();
+  const double* q_arr = batch.q().data();
+  const uint64_t first_index = batch.first_sample_index();
+
+  for (int k = 0; k < n; ++k) {
+    const double i = i_arr[k];
+    const double q = q_arr[k];
     const double magnitude_sq = i * i + q * q;
     const bool above = magnitude_sq >= threshold_sq_;
 
@@ -25,7 +30,7 @@ void PulseDetector::Process(const pulse::IQBatch& batch, pulse::PulseEventBatch*
       const double magnitude = std::sqrt(magnitude_sq);
       if (!in_pulse_) {
         in_pulse_ = true;
-        pulse_start_ = s.sample_index();
+        pulse_start_ = first_index + k;
         pulse_peak_ = magnitude;
         pulse_sum_ = magnitude;
         pulse_sample_count_ = 1;
@@ -35,12 +40,13 @@ void PulseDetector::Process(const pulse::IQBatch& batch, pulse::PulseEventBatch*
         ++pulse_sample_count_;
       }
     } else if (in_pulse_) {
-      pulse::PulseEvent* event = out->add_events();
-      event->set_start_sample(pulse_start_);
-      event->set_end_sample(s.sample_index());
-      event->set_peak_amplitude(pulse_peak_);
-      event->set_mean_amplitude(pulse_sum_ / static_cast<double>(pulse_sample_count_));
-      event->set_duration_seconds(static_cast<double>(pulse_sample_count_) / sample_rate_hz_);
+      // Columnar event output (see pulse.proto): one append per field,
+      // no per-event message allocation.
+      out->add_start_sample(pulse_start_);
+      out->add_end_sample(first_index + k);
+      out->add_peak_amplitude(pulse_peak_);
+      out->add_mean_amplitude(pulse_sum_ / static_cast<double>(pulse_sample_count_));
+      out->add_duration_seconds(static_cast<double>(pulse_sample_count_) / sample_rate_hz_);
       in_pulse_ = false;
     }
   }

@@ -28,19 +28,18 @@ def make_batch(amplitudes, start_index):
     amplitudes[k], keeping expected outputs computable by hand."""
     batch = pulse_pb2.IQBatch()
     batch.sample_rate_hz = SAMPLE_RATE_HZ
-    for k, amp in enumerate(amplitudes):
-        batch.samples.add(sample_index=start_index + k, i=amp, q=0.0)
+    batch.first_sample_index = start_index
+    batch.i.extend(amplitudes)
+    batch.q.extend([0.0] * len(amplitudes))
     return batch
 
 
-def make_event(start, peak, duration_s):
-    e = pulse_pb2.PulseEvent()
-    e.start_sample = start
-    e.end_sample = start + 1
-    e.peak_amplitude = peak
-    e.mean_amplitude = peak
-    e.duration_seconds = duration_s
-    return e
+def add_event(batch, start, peak, duration_s):
+    batch.start_sample.append(start)
+    batch.end_sample.append(start + 1)
+    batch.peak_amplitude.append(peak)
+    batch.mean_amplitude.append(peak)
+    batch.duration_seconds.append(duration_s)
 
 
 class TestIQSource(unittest.TestCase):
@@ -51,18 +50,19 @@ class TestIQSource(unittest.TestCase):
         src = SyntheticIQSource(sample_rate_hz=SAMPLE_RATE_HZ, num_pulses=10)
         batch = pulse_pb2.IQBatch()
         self.assertTrue(src.next_batch(batch))
-        self.assertEqual(len(batch.samples), 108)  # 10 * 10 + 8 leading gap
+        self.assertEqual(len(batch.i), 108)  # 10 * 10 + 8 leading gap
+        self.assertEqual(len(batch.q), 108)
         self.assertEqual(batch.sample_rate_hz, SAMPLE_RATE_HZ)
 
-        self.assertEqual(batch.samples[0].sample_index, 0)
-        self.assertEqual(batch.samples[0].i, -0.4973561074578567)
-        self.assertEqual(batch.samples[0].q, 0.16031197753276494)
-        self.assertEqual(batch.samples[7].i, -0.044113119725164296)
-        self.assertEqual(batch.samples[7].q, -0.2474199623678392)
-        self.assertEqual(batch.samples[8].i, 6.697328498560646)
-        self.assertEqual(batch.samples[8].q, 6.5812648301410235)
-        self.assertEqual(batch.samples[107].i, -0.31797348238014933)
-        self.assertEqual(batch.samples[107].q, 0.484969302077072)
+        self.assertEqual(batch.first_sample_index, 0)
+        self.assertEqual(batch.i[0], -0.4973561074578567)
+        self.assertEqual(batch.q[0], 0.16031197753276494)
+        self.assertEqual(batch.i[7], -0.044113119725164296)
+        self.assertEqual(batch.q[7], -0.2474199623678392)
+        self.assertEqual(batch.i[8], 6.697328498560646)
+        self.assertEqual(batch.q[8], 6.5812648301410235)
+        self.assertEqual(batch.i[107], -0.31797348238014933)
+        self.assertEqual(batch.q[107], 0.484969302077072)
 
         self.assertFalse(src.next_batch(batch))
 
@@ -76,7 +76,7 @@ class TestIQSource(unittest.TestCase):
         while a.next_batch(ba):
             self.assertTrue(b.next_batch(bb))
             self.assertEqual(ba.SerializeToString(), bb.SerializeToString())
-            samples += len(ba.samples)
+            samples += len(ba.i)
             batches += 1
         self.assertFalse(b.next_batch(bb))
         self.assertEqual(batches, 51)
@@ -90,21 +90,20 @@ class TestPulseDetector(unittest.TestCase):
         out = pulse_pb2.PulseEventBatch()
         detector.process(batch, out)
 
-        self.assertEqual(len(out.events), 1)
-        e = out.events[0]
-        self.assertEqual(e.start_sample, 102)
-        self.assertEqual(e.end_sample, 105)
-        self.assertEqual(e.peak_amplitude, 7.0)
-        self.assertEqual(e.mean_amplitude, 6.0)
-        self.assertEqual(e.duration_seconds, 3.0 / SAMPLE_RATE_HZ)
+        self.assertEqual(len(out.start_sample), 1)
+        self.assertEqual(out.start_sample[0], 102)
+        self.assertEqual(out.end_sample[0], 105)
+        self.assertEqual(out.peak_amplitude[0], 7.0)
+        self.assertEqual(out.mean_amplitude[0], 6.0)
+        self.assertEqual(out.duration_seconds[0], 3.0 / SAMPLE_RATE_HZ)
 
     def test_threshold_is_inclusive(self):
         detector = PulseDetector(amplitude_threshold=2.0, sample_rate_hz=SAMPLE_RATE_HZ)
         batch = make_batch([0.0, 2.0, 0.0], 0)
         out = pulse_pb2.PulseEventBatch()
         detector.process(batch, out)
-        self.assertEqual(len(out.events), 1)
-        self.assertEqual(out.events[0].peak_amplitude, 2.0)
+        self.assertEqual(len(out.start_sample), 1)
+        self.assertEqual(out.peak_amplitude[0], 2.0)
 
     def test_pulse_straddles_batch_boundary(self):
         # Never produced by the synthetic signal at this repo's
@@ -113,21 +112,20 @@ class TestPulseDetector(unittest.TestCase):
         detector = PulseDetector(amplitude_threshold=2.0, sample_rate_hz=SAMPLE_RATE_HZ)
         out = pulse_pb2.PulseEventBatch()
         detector.process(make_batch([0.5, 5.0, 6.0], 0), out)
-        self.assertEqual(len(out.events), 0)  # still open at batch end
+        self.assertEqual(len(out.start_sample), 0)  # still open at batch end
         detector.process(make_batch([7.0, 4.0, 0.5, 0.5], 3), out)
-        self.assertEqual(len(out.events), 1)
-        e = out.events[0]
-        self.assertEqual(e.start_sample, 1)
-        self.assertEqual(e.end_sample, 5)
-        self.assertEqual(e.peak_amplitude, 7.0)
-        self.assertEqual(e.mean_amplitude, (5.0 + 6.0 + 7.0 + 4.0) / 4.0)
-        self.assertEqual(e.duration_seconds, 4.0 / SAMPLE_RATE_HZ)
+        self.assertEqual(len(out.start_sample), 1)
+        self.assertEqual(out.start_sample[0], 1)
+        self.assertEqual(out.end_sample[0], 5)
+        self.assertEqual(out.peak_amplitude[0], 7.0)
+        self.assertEqual(out.mean_amplitude[0], (5.0 + 6.0 + 7.0 + 4.0) / 4.0)
+        self.assertEqual(out.duration_seconds[0], 4.0 / SAMPLE_RATE_HZ)
 
     def test_no_pulses(self):
         detector = PulseDetector(amplitude_threshold=2.0, sample_rate_hz=SAMPLE_RATE_HZ)
         out = pulse_pb2.PulseEventBatch()
         detector.process(make_batch([0.5, 1.0, 1.9, 0.1], 0), out)
-        self.assertEqual(len(out.events), 0)
+        self.assertEqual(len(out.start_sample), 0)
 
 
 class TestPulseStats(unittest.TestCase):
@@ -135,13 +133,13 @@ class TestPulseStats(unittest.TestCase):
         acc = PulseStatsAccumulator(sample_rate_hz=SAMPLE_RATE_HZ)
 
         batch1 = pulse_pb2.PulseEventBatch()
-        batch1.events.append(make_event(0, 5.0, 2e-7))
-        batch1.events.append(make_event(10, 7.0, 2e-7))
+        add_event(batch1, 0, 5.0, 2e-7)
+        add_event(batch1, 10, 7.0, 2e-7)
         acc.add(batch1)
 
         # PRI state must carry across add() calls.
         batch2 = pulse_pb2.PulseEventBatch()
-        batch2.events.append(make_event(30, 3.0, 4e-7))
+        add_event(batch2, 30, 3.0, 4e-7)
         acc.add(batch2)
 
         s = acc.finalize()
@@ -188,7 +186,7 @@ class TestDeinterleaver(unittest.TestCase):
         deint = Deinterleaver(sample_rate_hz=SAMPLE_RATE_HZ, pri_tolerance_seconds=1e-7)
         events = pulse_pb2.PulseEventBatch()
         for k in range(5):
-            events.events.append(make_event(10 * k, 5.0, 2e-7))
+            add_event(events, 10 * k, 5.0, 2e-7)
         out = pulse_pb2.DeinterleaveSummary()
         deint.process(events, out)
         self.assertEqual(len(out.tracks), 1)
@@ -207,7 +205,7 @@ class TestDeinterleaver(unittest.TestCase):
         starts = sorted([10 * k for k in range(9)] + [13 + 23 * k for k in range(4)])
         events = pulse_pb2.PulseEventBatch()
         for s in starts:
-            events.events.append(make_event(s, 5.0, 2e-7))
+            add_event(events, s, 5.0, 2e-7)
         out = pulse_pb2.DeinterleaveSummary()
         deint.process(events, out)
         self.assertEqual(len(out.tracks), 2)
@@ -231,13 +229,11 @@ class TestSpectrogram(unittest.TestCase):
         omega = 2.0 * math.pi * ((bin_index + 0.5) * bin_hz) / SAMPLE_RATE_HZ
         batch = pulse_pb2.IQBatch()
         batch.sample_rate_hz = SAMPLE_RATE_HZ
+        batch.first_sample_index = start_index
         for k in range(n):
             idx = start_index + k
-            batch.samples.add(
-                sample_index=idx,
-                i=amplitude * math.cos(omega * idx),
-                q=amplitude * math.sin(omega * idx),
-            )
+            batch.i.append(amplitude * math.cos(omega * idx))
+            batch.q.append(amplitude * math.sin(omega * idx))
         return batch
 
     def test_tone_lands_in_its_bin(self):

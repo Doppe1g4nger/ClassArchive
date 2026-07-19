@@ -103,14 +103,15 @@ def main() -> int:
         if mean_power > max_mean_power:
             max_mean_power = mean_power
 
+        # Columnar events: five bulk extend() calls replace the
+        # per-event message-construction loop the main branch needed.
         events_batch.Clear()
-        for k in range(len(ev_start)):
-            e = events_batch.events.add()
-            e.start_sample = int(ev_start[k])
-            e.end_sample = int(ev_end[k])
-            e.peak_amplitude = float(ev_peak[k])
-            e.mean_amplitude = float(ev_mean[k])
-            e.duration_seconds = float(ev_dur[k])
+        if len(ev_start) > 0:
+            events_batch.start_sample.extend(ev_start.tolist())
+            events_batch.end_sample.extend(ev_end.tolist())
+            events_batch.peak_amplitude.extend(ev_peak.tolist())
+            events_batch.mean_amplitude.extend(ev_mean.tolist())
+            events_batch.duration_seconds.extend(ev_dur.tolist())
 
         accumulator.add(events_batch)
         deinterleaver.process(events_batch, deinterleave_summary)

@@ -68,6 +68,16 @@ add_library(pulsecore STATIC
   common/src/deinterleaver.cpp
 )
 set_target_properties(pulsecore PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# Max-optimization branch: let the compiler vectorize the spectrogram's
+# correlator reduction. GCC will not vectorize a floating-point sum at
+# -O3 without permission to reassociate it; these flags grant exactly
+# that (plus AVX2/FMA codegen) for this ONE file, whose reductions are
+# already tolerance-gated rather than bit-exact on this branch (the
+# phase-table rework reassociated them first -- see spectrogram.cpp).
+# Not applied target-wide: the detector/stats/deinterleaver stay
+# bit-exact, and their sums must not reassociate.
+set_source_files_properties(common/src/spectrogram.cpp PROPERTIES
+  COMPILE_OPTIONS "-mavx2;-mfma;-fassociative-math;-fno-signed-zeros;-fno-trapping-math")
 target_include_directories(pulsecore PUBLIC common/include)
 target_link_libraries(pulsecore PUBLIC pulse_proto)
 

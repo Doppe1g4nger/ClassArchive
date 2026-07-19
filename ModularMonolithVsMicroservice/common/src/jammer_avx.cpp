@@ -22,35 +22,25 @@ JammerDetectorAvx::JammerDetectorAvx(double power_threshold, double duty_cycle_t
     : power_threshold_(power_threshold), duty_cycle_threshold_(duty_cycle_threshold) {}
 
 void JammerDetectorAvx::Process(const pulse::IQBatch& batch, pulse::JamSummary* out) {
-  const int n = batch.samples_size();
+  const int n = batch.i_size();
   if (n > 0) {
+    const double* i_arr = batch.i().data();
+    const double* q_arr = batch.q().data();
     const __m256d threshold_vec = _mm256_set1_pd(power_threshold_);
     // Four independent running sums (one per lane) -- explicitly *not*
     // the same accumulation order as the scalar version's single
     // running total. See the header for why that's an accepted,
-    // measured tradeoff here, unlike the detector.
+    // measured tradeoff here, unlike the detector. With the packed
+    // columnar schema the loads are straight from the message's
+    // contiguous arrays -- the gather step this kernel needed on the
+    // main branch's one-message-per-sample layout is gone.
     __m256d power_acc = _mm256_setzero_pd();
     uint64_t over_threshold = 0;
 
-    // Four-element, register-resident scratch instead of a batch-sized
-    // buffer -- see pulse_detector_avx.cpp for why: extracting the
-    // *whole* batch into heap arrays first (an earlier version of this
-    // function did exactly that) adds real memory traffic to pay for a
-    // compute bottleneck that was never there, since protobuf's
-    // pointer-chase through each IQSample -- not the arithmetic -- is
-    // what this loop actually costs.
-    alignas(32) double i_lane[4];
-    alignas(32) double q_lane[4];
-
     int k = 0;
     for (; k + 4 <= n; k += 4) {
-      for (int j = 0; j < 4; ++j) {
-        const pulse::IQSample& s = batch.samples(k + j);
-        i_lane[j] = s.i();
-        q_lane[j] = s.q();
-      }
-      const __m256d iv = _mm256_load_pd(i_lane);
-      const __m256d qv = _mm256_load_pd(q_lane);
+      const __m256d iv = _mm256_loadu_pd(i_arr + k);
+      const __m256d qv = _mm256_loadu_pd(q_arr + k);
       const __m256d power = _mm256_fmadd_pd(iv, iv, _mm256_mul_pd(qv, qv));
       power_acc = _mm256_add_pd(power_acc, power);
 
@@ -61,9 +51,8 @@ void JammerDetectorAvx::Process(const pulse::IQBatch& batch, pulse::JamSummary* 
 
     double power_sum = HorizontalSum(power_acc);
     for (; k < n; ++k) {
-      const pulse::IQSample& s = batch.samples(k);
-      const double i = s.i();
-      const double q = s.q();
+      const double i = i_arr[k];
+      const double q = q_arr[k];
       const double power = i * i + q * q;
       power_sum += power;
       if (power >= power_threshold_) ++over_threshold;

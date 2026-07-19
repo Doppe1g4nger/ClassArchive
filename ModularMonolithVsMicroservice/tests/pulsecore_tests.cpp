@@ -72,11 +72,10 @@ constexpr double kSampleRateHz = 10000000.0;
 pulse::IQBatch MakeBatch(const std::vector<double>& amplitudes, uint64_t start_index) {
   pulse::IQBatch batch;
   batch.set_sample_rate_hz(kSampleRateHz);
-  for (size_t k = 0; k < amplitudes.size(); ++k) {
-    pulse::IQSample* s = batch.add_samples();
-    s->set_sample_index(start_index + k);
-    s->set_i(amplitudes[k]);
-    s->set_q(0.0);
+  batch.set_first_sample_index(start_index);
+  for (double amp : amplitudes) {
+    batch.add_i(amp);
+    batch.add_q(0.0);
   }
   return batch;
 }
@@ -95,19 +94,20 @@ void TestIQSourceGoldenValues() {
   pulse::IQBatch batch;
   CHECK(source.NextBatch(&batch));
   // 10 pulses * 10-sample period + 8 leading gap samples = 108.
-  CHECK(batch.samples_size() == 108);
+  CHECK(batch.i_size() == 108);
+  CHECK(batch.q_size() == 108);
   CHECK_EQ_D(batch.sample_rate_hz(), kSampleRateHz);
 
-  CHECK(batch.samples(0).sample_index() == 0);
-  CHECK_EQ_D(batch.samples(0).i(), -0.4973561074578567);
-  CHECK_EQ_D(batch.samples(0).q(), 0.16031197753276494);
-  CHECK_EQ_D(batch.samples(7).i(), -0.044113119725164296);
-  CHECK_EQ_D(batch.samples(7).q(), -0.2474199623678392);
+  CHECK(batch.first_sample_index() == 0);
+  CHECK_EQ_D(batch.i(0), -0.4973561074578567);
+  CHECK_EQ_D(batch.q(0), 0.16031197753276494);
+  CHECK_EQ_D(batch.i(7), -0.044113119725164296);
+  CHECK_EQ_D(batch.q(7), -0.2474199623678392);
   // Sample 8 is the first in-pulse sample: 10/sqrt(2) + noise.
-  CHECK_EQ_D(batch.samples(8).i(), 6.697328498560646);
-  CHECK_EQ_D(batch.samples(8).q(), 6.5812648301410235);
-  CHECK_EQ_D(batch.samples(107).i(), -0.31797348238014933);
-  CHECK_EQ_D(batch.samples(107).q(), 0.484969302077072);
+  CHECK_EQ_D(batch.i(8), 6.697328498560646);
+  CHECK_EQ_D(batch.q(8), 6.5812648301410235);
+  CHECK_EQ_D(batch.i(107), -0.31797348238014933);
+  CHECK_EQ_D(batch.q(107), 0.484969302077072);
 
   // One 108-sample signal fits in a single batch.
   CHECK(!source.NextBatch(&batch));
@@ -123,7 +123,7 @@ void TestIQSourceDeterminismAndBatching() {
   while (a.NextBatch(&ba)) {
     CHECK(b.NextBatch(&bb));
     CHECK(ba.SerializeAsString() == bb.SerializeAsString());
-    samples += ba.samples_size();
+    samples += ba.i_size();
     ++batches;
   }
   CHECK(!b.NextBatch(&bb));
@@ -144,13 +144,12 @@ void TestDetectorBasicPulse() {
   pulse::PulseEventBatch out;
   detector.Process(batch, &out);
 
-  CHECK(out.events_size() == 1);
-  const pulse::PulseEvent& e = out.events(0);
-  CHECK(e.start_sample() == 102);
-  CHECK(e.end_sample() == 105);  // first below-threshold sample
-  CHECK_EQ_D(e.peak_amplitude(), 7.0);
-  CHECK_EQ_D(e.mean_amplitude(), 6.0);
-  CHECK_EQ_D(e.duration_seconds(), 3.0 / kSampleRateHz);
+  CHECK(out.start_sample_size() == 1);
+  CHECK(out.start_sample(0) == 102);
+  CHECK(out.end_sample(0) == 105);  // first below-threshold sample
+  CHECK_EQ_D(out.peak_amplitude(0), 7.0);
+  CHECK_EQ_D(out.mean_amplitude(0), 6.0);
+  CHECK_EQ_D(out.duration_seconds(0), 3.0 / kSampleRateHz);
 }
 
 void TestDetectorThresholdIsInclusive() {
@@ -159,8 +158,8 @@ void TestDetectorThresholdIsInclusive() {
   pulse::IQBatch batch = MakeBatch({0.0, 2.0, 0.0}, 0);
   pulse::PulseEventBatch out;
   detector.Process(batch, &out);
-  CHECK(out.events_size() == 1);
-  CHECK_EQ_D(out.events(0).peak_amplitude(), 2.0);
+  CHECK(out.start_sample_size() == 1);
+  CHECK_EQ_D(out.peak_amplitude(0), 2.0);
 }
 
 void TestDetectorStraddlesBatchBoundary() {
@@ -174,16 +173,15 @@ void TestDetectorStraddlesBatchBoundary() {
   pulse::PulseEventBatch out;
 
   detector.Process(first, &out);
-  CHECK(out.events_size() == 0);  // pulse still open at batch end
+  CHECK(out.start_sample_size() == 0);  // pulse still open at batch end
 
   detector.Process(second, &out);
-  CHECK(out.events_size() == 1);
-  const pulse::PulseEvent& e = out.events(0);
-  CHECK(e.start_sample() == 1);
-  CHECK(e.end_sample() == 5);
-  CHECK_EQ_D(e.peak_amplitude(), 7.0);
-  CHECK_EQ_D(e.mean_amplitude(), (5.0 + 6.0 + 7.0 + 4.0) / 4.0);
-  CHECK_EQ_D(e.duration_seconds(), 4.0 / kSampleRateHz);
+  CHECK(out.start_sample_size() == 1);
+  CHECK(out.start_sample(0) == 1);
+  CHECK(out.end_sample(0) == 5);
+  CHECK_EQ_D(out.peak_amplitude(0), 7.0);
+  CHECK_EQ_D(out.mean_amplitude(0), (5.0 + 6.0 + 7.0 + 4.0) / 4.0);
+  CHECK_EQ_D(out.duration_seconds(0), 4.0 / kSampleRateHz);
 }
 
 void TestDetectorNoPulses() {
@@ -191,35 +189,33 @@ void TestDetectorNoPulses() {
   pulse::IQBatch batch = MakeBatch({0.5, 1.0, 1.9, 0.1}, 0);
   pulse::PulseEventBatch out;
   detector.Process(batch, &out);
-  CHECK(out.events_size() == 0);
+  CHECK(out.start_sample_size() == 0);
 }
 
 // ---------------------------------------------------------------------------
 // PulseStatsAccumulator
 // ---------------------------------------------------------------------------
 
-pulse::PulseEvent MakeEvent(uint64_t start, double peak, double duration_s) {
-  pulse::PulseEvent e;
-  e.set_start_sample(start);
-  e.set_end_sample(start + 1);
-  e.set_peak_amplitude(peak);
-  e.set_mean_amplitude(peak);
-  e.set_duration_seconds(duration_s);
-  return e;
+void AddEvent(pulse::PulseEventBatch* batch, uint64_t start, double peak, double duration_s) {
+  batch->add_start_sample(start);
+  batch->add_end_sample(start + 1);
+  batch->add_peak_amplitude(peak);
+  batch->add_mean_amplitude(peak);
+  batch->add_duration_seconds(duration_s);
 }
 
 void TestStatsAccumulator() {
   pulsecore::PulseStatsAccumulator acc(kSampleRateHz);
 
   pulse::PulseEventBatch batch1;
-  *batch1.add_events() = MakeEvent(0, 5.0, 2e-7);
-  *batch1.add_events() = MakeEvent(10, 7.0, 2e-7);
+  AddEvent(&batch1, 0, 5.0, 2e-7);
+  AddEvent(&batch1, 10, 7.0, 2e-7);
   acc.Add(batch1);
 
   // PRI state must carry across Add() calls: the gap from sample 10 to
   // sample 30 spans this batch boundary.
   pulse::PulseEventBatch batch2;
-  *batch2.add_events() = MakeEvent(30, 3.0, 4e-7);
+  AddEvent(&batch2, 30, 3.0, 4e-7);
   acc.Add(batch2);
 
   pulse::PulseSummary s = acc.Finalize();
@@ -276,7 +272,7 @@ void TestDeinterleaverSingleEmitter() {
   pulse::PulseEventBatch events;
   // Steady 10-sample PRI.
   for (uint64_t k = 0; k < 5; ++k) {
-    *events.add_events() = MakeEvent(10 * k, 5.0, 2e-7);
+    AddEvent(&events, 10 * k, 5.0, 2e-7);
   }
   pulse::DeinterleaveSummary out;
   deint.Process(events, &out);
@@ -305,7 +301,7 @@ void TestDeinterleaverTwoEmitters() {
   for (uint64_t k = 0; k < 9; ++k) starts.push_back(10 * k);       // A: 0..80, PRI 10
   for (uint64_t k = 0; k < 4; ++k) starts.push_back(13 + 23 * k);  // B: 13,36,59,82
   std::sort(starts.begin(), starts.end());
-  for (uint64_t s : starts) *events.add_events() = MakeEvent(s, 5.0, 2e-7);
+  for (uint64_t s : starts) AddEvent(&events, s, 5.0, 2e-7);
 
   pulse::DeinterleaveSummary out;
   deint.Process(events, &out);
@@ -338,11 +334,10 @@ void TestSpectrogramToneLandsInItsBin() {
 
   pulse::IQBatch batch;
   batch.set_sample_rate_hz(kSampleRateHz);
+  batch.set_first_sample_index(0);
   for (int n = 0; n < 1000; ++n) {
-    pulse::IQSample* s = batch.add_samples();
-    s->set_sample_index(n);
-    s->set_i(kAmplitude * std::cos(omega * n));
-    s->set_q(kAmplitude * std::sin(omega * n));
+    batch.add_i(kAmplitude * std::cos(omega * n));
+    batch.add_q(kAmplitude * std::sin(omega * n));
   }
 
   pulsecore::SpectrogramAnalyzer analyzer(kSampleRateHz, kNumBins);
@@ -371,11 +366,10 @@ void TestSpectrogramRunningState() {
 
   pulse::IQBatch tone;
   tone.set_sample_rate_hz(kSampleRateHz);
+  tone.set_first_sample_index(0);
   for (int n = 0; n < 500; ++n) {
-    pulse::IQSample* s = tone.add_samples();
-    s->set_sample_index(n);
-    s->set_i(2.0 * std::cos(omega * n));
-    s->set_q(2.0 * std::sin(omega * n));
+    tone.add_i(2.0 * std::cos(omega * n));
+    tone.add_q(2.0 * std::sin(omega * n));
   }
   analyzer.Process(tone, &out);
   const double tone_mag = out.max_magnitude(2);

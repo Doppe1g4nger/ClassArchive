@@ -33,12 +33,25 @@ class PulseDetector:
         pulse_peak = self._pulse_peak
         pulse_sum = self._pulse_sum
         pulse_sample_count = self._pulse_sample_count
-        add_event = out.events.add
         sqrt = math.sqrt
 
-        for s in batch.samples:
-            si = s.i
-            sq = s.q
+        # Packed columnar layout: one bulk copy of each array out of
+        # protobuf (upb serves list() of a packed field in C), then the
+        # loop runs over plain Python floats -- no per-sample protobuf
+        # accessor at all. Detected events accumulate in plain lists and
+        # go back into protobuf as five bulk extend() calls.
+        i_list = list(batch.i)
+        q_list = list(batch.q)
+        first_index = batch.first_sample_index
+        ev_start = []
+        ev_end = []
+        ev_peak = []
+        ev_mean = []
+        ev_dur = []
+
+        for k in range(len(i_list)):
+            si = i_list[k]
+            sq = q_list[k]
             magnitude_sq = si * si + sq * sq
             above = magnitude_sq >= threshold_sq
 
@@ -49,7 +62,7 @@ class PulseDetector:
                 magnitude = sqrt(magnitude_sq)
                 if not in_pulse:
                     in_pulse = True
-                    pulse_start = s.sample_index
+                    pulse_start = first_index + k
                     pulse_peak = magnitude
                     pulse_sum = magnitude
                     pulse_sample_count = 1
@@ -59,13 +72,19 @@ class PulseDetector:
                     pulse_sum += magnitude
                     pulse_sample_count += 1
             elif in_pulse:
-                event = add_event()
-                event.start_sample = pulse_start
-                event.end_sample = s.sample_index
-                event.peak_amplitude = pulse_peak
-                event.mean_amplitude = pulse_sum / pulse_sample_count
-                event.duration_seconds = pulse_sample_count / sample_rate_hz
+                ev_start.append(pulse_start)
+                ev_end.append(first_index + k)
+                ev_peak.append(pulse_peak)
+                ev_mean.append(pulse_sum / pulse_sample_count)
+                ev_dur.append(pulse_sample_count / sample_rate_hz)
                 in_pulse = False
+
+        if ev_start:
+            out.start_sample.extend(ev_start)
+            out.end_sample.extend(ev_end)
+            out.peak_amplitude.extend(ev_peak)
+            out.mean_amplitude.extend(ev_mean)
+            out.duration_seconds.extend(ev_dur)
 
         self._in_pulse = in_pulse
         self._pulse_start = pulse_start

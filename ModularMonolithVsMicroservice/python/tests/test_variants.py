@@ -54,10 +54,11 @@ def reference_batches():
     src = SyntheticIQSource(sample_rate_hz=SAMPLE_RATE_HZ, num_pulses=NUM_PULSES)
     batch = pulse_pb2.IQBatch()
     while src.next_batch(batch):
-        n = len(batch.samples)
-        i = np.fromiter((s.i for s in batch.samples), dtype=np.float64, count=n)
-        q = np.fromiter((s.q for s in batch.samples), dtype=np.float64, count=n)
-        idx = np.fromiter((s.sample_index for s in batch.samples), dtype=np.uint64, count=n)
+        n = len(batch.i)
+        i = np.asarray(batch.i, dtype=np.float64)
+        q = np.asarray(batch.q, dtype=np.float64)
+        first = batch.first_sample_index
+        idx = np.arange(first, first + n, dtype=np.uint64)
         yield batch, i, q, idx
 
 
@@ -70,15 +71,16 @@ class TestNumbaKernelParity(unittest.TestCase):
         rng_state = 42
         cursor = 0
         while src.next_batch(batch):
-            n = len(batch.samples)
+            n = len(batch.i)
             i_arr, q_arr, idx_arr, rng_state = numba_kernels.generate_batch(
                 cursor, n, period, _GAP_SAMPLES, _PULSE_COMPONENT, _NOISE_AMPLITUDE, rng_state
             )
             cursor += n
+            first = batch.first_sample_index
             for k in (0, 1, n // 2, n - 1):
-                self.assertEqual(batch.samples[k].i, i_arr[k])
-                self.assertEqual(batch.samples[k].q, q_arr[k])
-                self.assertEqual(batch.samples[k].sample_index, idx_arr[k])
+                self.assertEqual(batch.i[k], i_arr[k])
+                self.assertEqual(batch.q[k], q_arr[k])
+                self.assertEqual(first + k, idx_arr[k])
 
     def test_detector_bit_identical_including_straddle(self):
         ref = PulseDetector(amplitude_threshold=6.0, sample_rate_hz=SAMPLE_RATE_HZ)
@@ -89,13 +91,13 @@ class TestNumbaKernelParity(unittest.TestCase):
             (ev_start, ev_end, ev_peak, ev_mean, ev_dur, *state) = numba_kernels.detect_pulses(
                 i, q, idx, 36.0, SAMPLE_RATE_HZ, *state
             )
-            self.assertEqual(len(expected.events), len(ev_start))
-            for k, e in enumerate(expected.events):
-                self.assertEqual(e.start_sample, ev_start[k])
-                self.assertEqual(e.end_sample, ev_end[k])
-                self.assertEqual(e.peak_amplitude, ev_peak[k])
-                self.assertEqual(e.mean_amplitude, ev_mean[k])
-                self.assertEqual(e.duration_seconds, ev_dur[k])
+            self.assertEqual(len(expected.start_sample), len(ev_start))
+            for k in range(len(expected.start_sample)):
+                self.assertEqual(expected.start_sample[k], ev_start[k])
+                self.assertEqual(expected.end_sample[k], ev_end[k])
+                self.assertEqual(expected.peak_amplitude[k], ev_peak[k])
+                self.assertEqual(expected.mean_amplitude[k], ev_mean[k])
+                self.assertEqual(expected.duration_seconds[k], ev_dur[k])
 
     def test_spectrogram_bit_identical(self):
         num_bins = 8
@@ -200,11 +202,12 @@ class TestNumpyKernelParity(unittest.TestCase):
             got = arr.next_batch()
             self.assertIsNotNone(got)
             i_arr, q_arr, idx = got
-            n = len(batch.samples)
+            n = len(batch.i)
+            first = batch.first_sample_index
             for k in (0, 1, n // 2, n - 1):
-                self.assertEqual(batch.samples[k].i, i_arr[k])
-                self.assertEqual(batch.samples[k].q, q_arr[k])
-                self.assertEqual(batch.samples[k].sample_index, idx[k])
+                self.assertEqual(batch.i[k], i_arr[k])
+                self.assertEqual(batch.q[k], q_arr[k])
+                self.assertEqual(first + k, idx[k])
         self.assertIsNone(arr.next_batch())
 
     def test_detector_bit_identical_including_straddle(self):
@@ -221,12 +224,14 @@ class TestNumpyKernelParity(unittest.TestCase):
         expected = pulse_pb2.PulseEventBatch()
         b1 = pulse_pb2.IQBatch()
         b1.sample_rate_hz = SAMPLE_RATE_HZ
-        for k, a in enumerate(amps1):
-            b1.samples.add(sample_index=k, i=a, q=0.0)
+        b1.first_sample_index = 0
+        b1.i.extend(amps1)
+        b1.q.extend([0.0] * len(amps1))
         b2 = pulse_pb2.IQBatch()
         b2.sample_rate_hz = SAMPLE_RATE_HZ
-        for k, a in enumerate(amps2):
-            b2.samples.add(sample_index=3 + k, i=a, q=0.0)
+        b2.first_sample_index = 3
+        b2.i.extend(amps2)
+        b2.q.extend([0.0] * len(amps2))
         ref.process(b1, expected)
         ref.process(b2, expected)
 
@@ -242,11 +247,12 @@ class TestNumpyKernelParity(unittest.TestCase):
                 got.append((int(ev_start[k]), int(ev_end[k]), float(ev_peak[k]),
                             float(ev_mean[k]), float(ev_dur[k])))
 
-        self.assertEqual(len(expected.events), len(got))
-        for e, g in zip(expected.events, got):
+        self.assertEqual(len(expected.start_sample), len(got))
+        for k, g in enumerate(got):
             self.assertEqual(
-                (e.start_sample, e.end_sample, e.peak_amplitude, e.mean_amplitude,
-                 e.duration_seconds),
+                (expected.start_sample[k], expected.end_sample[k],
+                 expected.peak_amplitude[k], expected.mean_amplitude[k],
+                 expected.duration_seconds[k]),
                 g,
             )
 

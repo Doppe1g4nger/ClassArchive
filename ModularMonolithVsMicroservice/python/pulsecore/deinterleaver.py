@@ -38,9 +38,12 @@ class Deinterleaver:
         tracks = self._tracks
         next_track_id = self._next_track_id
 
-        for event in batch.events:
-            start_sample = event.start_sample
-            peak_amplitude = event.peak_amplitude
+        # Columnar events (see pulse.proto): parallel arrays.
+        ev_starts = list(batch.start_sample)
+        ev_peaks = list(batch.peak_amplitude)
+        for e in range(len(ev_starts)):
+            start_sample = ev_starts[e]
+            peak_amplitude = ev_peaks[e]
             pulse_time = start_sample / sample_rate_hz
 
             # Prefer the closest track whose predicted next-pulse time

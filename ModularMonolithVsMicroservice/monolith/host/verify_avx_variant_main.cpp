@@ -36,21 +36,12 @@ bool CheckDetector(int num_pulses) {
     scalar_detector.Process(batch, &scalar_events);
     avx_detector.Process(batch, &avx_events);
 
-    if (scalar_events.events_size() != avx_events.events_size()) {
-      std::printf("  batch %d: event count mismatch (%d vs %d)\n", batches,
-                  scalar_events.events_size(), avx_events.events_size());
+    // Columnar events: serialized equality covers every field of every
+    // event in order (packed scalar fields serialize deterministically).
+    if (scalar_events.SerializeAsString() != avx_events.SerializeAsString()) {
+      std::printf("  batch %d: event batch mismatch (%d vs %d events)\n", batches,
+                  scalar_events.start_sample_size(), avx_events.start_sample_size());
       exact = false;
-    } else {
-      for (int i = 0; i < scalar_events.events_size(); ++i) {
-        const pulse::PulseEvent& a = scalar_events.events(i);
-        const pulse::PulseEvent& b = avx_events.events(i);
-        if (a.start_sample() != b.start_sample() || a.end_sample() != b.end_sample() ||
-            a.peak_amplitude() != b.peak_amplitude() || a.mean_amplitude() != b.mean_amplitude() ||
-            a.duration_seconds() != b.duration_seconds()) {
-          std::printf("  batch %d event %d: mismatch\n", batches, i);
-          exact = false;
-        }
-      }
     }
     ++batches;
   }

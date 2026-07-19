@@ -8,8 +8,12 @@ Deinterleaver::Deinterleaver(double sample_rate_hz, double pri_tolerance_seconds
     : sample_rate_hz_(sample_rate_hz), pri_tolerance_seconds_(pri_tolerance_seconds) {}
 
 void Deinterleaver::Process(const pulse::PulseEventBatch& batch, pulse::DeinterleaveSummary* out) {
-  for (const pulse::PulseEvent& event : batch.events()) {
-    const double pulse_time = static_cast<double>(event.start_sample()) / sample_rate_hz_;
+  // Columnar events (see pulse.proto): entry e across the parallel
+  // arrays is one pulse.
+  const int n_events = batch.start_sample_size();
+  for (int e = 0; e < n_events; ++e) {
+    const uint64_t start_sample = batch.start_sample(e);
+    const double pulse_time = static_cast<double>(start_sample) / sample_rate_hz_;
 
     // Prefer the closest track whose predicted next-pulse time falls
     // within tolerance; fall back to a track that only has one pulse so
@@ -44,8 +48,8 @@ void Deinterleaver::Process(const pulse::PulseEventBatch& batch, pulse::Deinterl
       target->pri_sum_seconds += (pulse_time - last_time);
       ++target->pri_count;
     }
-    target->last_start_sample = event.start_sample();
-    target->peak_sum += event.peak_amplitude();
+    target->last_start_sample = start_sample;
+    target->peak_sum += batch.peak_amplitude(e);
     ++target->pulse_count;
   }
 

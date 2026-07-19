@@ -46,6 +46,7 @@ class SyntheticIQSource:
 
         batch.Clear()
         batch.sample_rate_hz = self._sample_rate_hz
+        batch.first_sample_index = self._sample_cursor
 
         period = _GAP_SAMPLES + _PULSE_SAMPLES
         gap_samples = _GAP_SAMPLES
@@ -55,51 +56,42 @@ class SyntheticIQSource:
         uint32_max = _UINT32_MAX
         count = min(_BATCH_SIZE, self._total_samples - self._sample_cursor)
         cursor = self._sample_cursor
-        add_sample = batch.samples.add
         rng = self._rng_state
         # phase cycles through [0, period) in lockstep with the sample
         # index; tracking it with an increment-and-wrap instead of
         # `idx % period` every iteration avoids a division per sample.
         phase = cursor % period
 
-        for i in range(count):
+        # Packed columnar layout (see pulse.proto): build plain Python
+        # lists in the loop, then hand each to protobuf in ONE bulk
+        # extend() call -- upb copies a list of floats into a packed
+        # array in C. The main branch's best effort was one add(**kwargs)
+        # protobuf call per sample; this is two protobuf calls per batch.
+        i_list = []
+        q_list = []
+        i_append = i_list.append
+        q_append = q_list.append
+
+        for _ in range(count):
             component = pulse_component if phase >= gap_samples else 0.0
             phase += 1
             if phase == period:
                 phase = 0
 
-            # Inlined xorshift32 (was a self._next_noise() method called
-            # twice per sample -- 20,000 bound-method calls per
-            # 10,000-sample batch just for RNG dispatch). A C++ compiler
-            # inlines the equivalent private-method calls automatically at
-            # -O3 (see iq_source.cpp); CPython never inlines method calls,
-            # so this does it by hand to get the same effect. Still
-            # matches common/src/iq_source.cpp bit-for-bit: each step
-            # explicitly masks to 32 bits since Python integers don't wrap
-            # on their own the way C++'s uint32_t does, and i's noise is
-            # drawn before q's, same order as the two original calls.
+            # Inlined xorshift32, bit-for-bit the C++ sequence -- see
+            # the main branch's history for why the masking is explicit.
             rng = (rng ^ (rng << 13)) & mask
             rng = (rng ^ (rng >> 17)) & mask
             rng = (rng ^ (rng << 5)) & mask
-            noise_i = ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude
+            i_append(component + ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude)
 
             rng = (rng ^ (rng << 13)) & mask
             rng = (rng ^ (rng >> 17)) & mask
             rng = (rng ^ (rng << 5)) & mask
-            noise_q = ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude
+            q_append(component + ((rng / uint32_max) - 0.5) * 2.0 * noise_amplitude)
 
-            # One add() call with field kwargs instead of add() plus
-            # three attribute assignments -- upb constructs and fills
-            # the sample in a single C call, saving three descriptor
-            # lookups and three setattr dispatches per sample (30,000
-            # interpreted operations per batch; cProfile showed this
-            # loop's protobuf traffic among the monolith's top line
-            # items). Field values are identical either way.
-            add_sample(
-                sample_index=cursor + i,
-                i=component + noise_i,
-                q=component + noise_q,
-            )
+        batch.i.extend(i_list)
+        batch.q.extend(q_list)
 
         self._sample_cursor = cursor + count
         self._rng_state = rng

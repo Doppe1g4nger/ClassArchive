@@ -17,45 +17,59 @@ SpectrogramAnalyzer::SpectrogramAnalyzer(double sample_rate_hz, int num_bins)
       sum_magnitude_(num_bins, 0.0) {}
 
 void SpectrogramAnalyzer::Process(const pulse::IQBatch& batch, pulse::SpectrogramSummary* out) {
-  if (!batch.samples().empty()) {
-    for (int bin = 0; bin < num_bins_; ++bin) {
-      // Bin center frequencies are spaced evenly across [0, Nyquist/2);
-      // exact placement doesn't matter for this demo, only that it's
-      // deterministic and consistent between the two architectures.
-      const double freq_hz = (bin + 0.5) * bin_hz_;
-      const double omega = 2.0 * kPi * freq_hz / sample_rate_hz_;
+  const int n = batch.i_size();
+  if (n > 0) {
+    const double* i_arr = batch.i().data();
+    const double* q_arr = batch.q().data();
 
-      // Rotate a unit phasor by -omega per sample instead of calling
-      // cos()/sin() for every one: seed it once at this batch's first
-      // sample_index, then advance it with one fixed complex multiply
-      // per sample. At 10,000 samples/bin/batch that's the difference
-      // between ~4 transcendental calls and ~20,000 per batch -- with 8
-      // bins and hundreds of batches, calling cos()/sin() per sample
-      // dominated the whole pipeline's runtime. Floating-point drift in
-      // the rotator's magnitude over one batch (a few thousand
-      // multiplies) is far below anything visible in the output; this
-      // wouldn't be safe to run for millions of samples without
-      // periodic renormalization, but each batch reseeds from scratch.
-      const double start_phase = omega * static_cast<double>(batch.samples(0).sample_index());
-      double rot_re = std::cos(start_phase);
-      double rot_im = -std::sin(start_phase);  // rot == e^{-j*omega*n}
-      const double step_re = std::cos(omega);
-      const double step_im = -std::sin(omega);  // step == e^{-j*omega}
+    // Per-bin offset tables e^{-j*omega*k}, built once per batch length
+    // (this repo has exactly two: 10,000 and the 8-sample tail) -- the
+    // max-optimization branch's port of the numpy variant's phase-table
+    // fix. The absolute phase omega*(first+k) factors into a per-batch
+    // scalar phasor e^{-j*omega*first} times the cached table, so the
+    // per-(bin,sample) work below is pure multiply/add over four
+    // contiguous double arrays -- exactly the shape the compiler's
+    // auto-vectorizer wants (see CMakeLists.txt for the reduction-math
+    // flags on this file, and the tolerance note in the branch docs:
+    // reassociated reductions are not bit-identical to the main
+    // branch's recursive rotation, they are printed-output-identical
+    // and tolerance-verified).
+    if (n != table_n_) {
+      table_n_ = n;
+      table_re_.assign(static_cast<size_t>(num_bins_) * n, 0.0);
+      table_im_.assign(static_cast<size_t>(num_bins_) * n, 0.0);
+      for (int bin = 0; bin < num_bins_; ++bin) {
+        const double omega = 2.0 * kPi * ((bin + 0.5) * bin_hz_) / sample_rate_hz_;
+        double* tr = &table_re_[static_cast<size_t>(bin) * n];
+        double* ti = &table_im_[static_cast<size_t>(bin) * n];
+        for (int k = 0; k < n; ++k) {
+          tr[k] = std::cos(omega * k);
+          ti[k] = -std::sin(omega * k);
+        }
+      }
+    }
+
+    const double first = static_cast<double>(batch.first_sample_index());
+    for (int bin = 0; bin < num_bins_; ++bin) {
+      const double omega = 2.0 * kPi * ((bin + 0.5) * bin_hz_) / sample_rate_hz_;
+      const double phase0 = omega * first;
+      const double r0_re = std::cos(phase0);
+      const double r0_im = -std::sin(phase0);
+      const double* tr = &table_re_[static_cast<size_t>(bin) * n];
+      const double* ti = &table_im_[static_cast<size_t>(bin) * n];
 
       double re = 0.0;
       double im = 0.0;
-      for (const pulse::IQSample& s : batch.samples()) {
-        // Correlate the complex sample (i + j*q) against the rotator.
-        re += s.i() * rot_re - s.q() * rot_im;
-        im += s.i() * rot_im + s.q() * rot_re;
-
-        const double next_re = rot_re * step_re - rot_im * step_im;
-        const double next_im = rot_re * step_im + rot_im * step_re;
-        rot_re = next_re;
-        rot_im = next_im;
+      for (int k = 0; k < n; ++k) {
+        // rot = (r0_re + j*r0_im) * (tr[k] + j*ti[k]); correlate
+        // (i + j*q) against it.
+        const double rot_re = r0_re * tr[k] - r0_im * ti[k];
+        const double rot_im = r0_re * ti[k] + r0_im * tr[k];
+        re += i_arr[k] * rot_re - q_arr[k] * rot_im;
+        im += i_arr[k] * rot_im + q_arr[k] * rot_re;
       }
 
-      const double magnitude = std::sqrt(re * re + im * im) / static_cast<double>(batch.samples_size());
+      const double magnitude = std::sqrt(re * re + im * im) / static_cast<double>(n);
       max_magnitude_[bin] = std::max(max_magnitude_[bin], magnitude);
       sum_magnitude_[bin] += magnitude;
     }
