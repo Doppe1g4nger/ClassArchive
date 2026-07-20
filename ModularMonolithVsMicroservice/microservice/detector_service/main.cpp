@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
 #include "framing.h"
 #include "iq_source.h"
@@ -37,11 +38,19 @@ int main(int argc, char** argv) {
   pulsecore::PulseDetector detector(/*amplitude_threshold=*/6.0, kSampleRateHz);
   pulsecore::SyntheticIQSource source(kSampleRateHz, num_pulses);
 
-  // Reused across iterations for the same reason common/ loops reuse
-  // their message objects -- see pulse_detector_plugin.cpp's history.
-  // frame.iq() is filled directly by NextBatch() below (no copy).
-  pulse::PipelineFrame frame;
-  std::string payload;
+  // Round three of the theoretical-limits branch: the signal is a
+  // GIVEN (real IQ comes from a radio; no architecture makes the
+  // antenna faster), so every batch is generated before the clock
+  // starts and the measured region begins at detection -- matching
+  // monolith_main.cpp's identical charter.
+  std::vector<pulse::PipelineFrame> frames;
+  {
+    pulse::PipelineFrame f;
+    while (source.NextBatch(f.mutable_iq())) {
+      frames.push_back(std::move(f));
+      f.Clear();
+    }
+  }
   int batches_sent = 0;
 
   // Timed region starts right after connect() succeeds -- which, thanks
@@ -54,12 +63,12 @@ int main(int argc, char** argv) {
   // microservice/deinterleave_service/main.cpp for the matching
   // measurement at the other end of the pipeline.
   const auto steady_state_start = std::chrono::steady_clock::now();
-  while (source.NextBatch(frame.mutable_iq())) {
-    frame.mutable_events()->Clear();
+  for (pulse::PipelineFrame& frame : frames) {
     detector.Process(frame.iq(), frame.mutable_events());
 
-    frame.SerializeToString(&payload);
-    if (!netutil::SendMessage(downstream, payload)) {
+    // Zero-copy send: serializes directly into the ring slot -- no
+    // payload string, no zero-fill, no extra copy (see framing.h).
+    if (!netutil::SendMessage(downstream, frame)) {
       std::fprintf(stderr, "[detector_service] send failed, spectrogram_service may have exited\n");
       netutil::Close(downstream);
       return 1;

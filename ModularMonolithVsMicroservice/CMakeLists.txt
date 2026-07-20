@@ -176,7 +176,10 @@ endif()
 # Microservice pair: two executables, connected by protobuf over TCP.
 # ---------------------------------------------------------------------------
 add_library(netutil STATIC microservice/net/framing.cpp)
-target_include_directories(netutil PUBLIC microservice/net)
+target_include_directories(netutil PUBLIC microservice/net ${Protobuf_INCLUDE_DIRS})
+# The zero-copy Send/Recv overloads serialize/parse MessageLite
+# directly in ring slots -- see framing.h.
+target_link_libraries(netutil PUBLIC ${Protobuf_LIBRARIES})
 
 add_executable(detector_service microservice/detector_service/main.cpp)
 target_link_libraries(detector_service PRIVATE pulsecore netutil)

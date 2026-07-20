@@ -48,29 +48,25 @@ _PRI_TOLERANCE_SECONDS = 1e-7
 
 
 def _warm_up():
-    """Forces numba to JIT-compile (or load from its on-disk cache) every
-    kernel before the timed region starts, the same way monolith_app.py
-    excludes dlopen() and monolith_app.py (Python) excludes import: a
-    one-time cost that has nothing to do with steady-state throughput.
-    Dummy sizes are small (4 samples) purely so compilation is fast;
-    correctness of the compiled code is verified separately, not here."""
-    i = np.array([1.0, 2.0, 3.0, 4.0])
-    q = np.array([1.0, 2.0, 3.0, 4.0])
-    idx = np.array([0, 1, 2, 3], dtype=np.uint64)
+    """Forces numba to JIT-compile (or load from its on-disk cache) the
+    fused pipeline kernel before the timed region starts, the same way
+    monolith_app.py excludes dlopen() and the Python monolith excludes
+    import: a one-time cost that has nothing to do with steady-state
+    throughput. The dummy run is tiny (two 4-sample batches) purely so
+    compilation is fast; correctness of the compiled code is verified
+    separately (tests/test_variants.py), not here."""
+    i = np.array([1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0])
+    q = np.array([1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0])
+    idx = np.arange(8, dtype=np.uint64)
+    offsets = np.array([0, 4, 8], dtype=np.int64)
     kernels.generate_batch(0, 4, 10, 8, _PULSE_COMPONENT, _NOISE_AMPLITUDE, 42)
-    kernels.detect_pulses(i, q, idx, 36.0, _SAMPLE_RATE_HZ, False, 0, 0.0, 0.0, 0)
-    kernels.spectrogram_bins(i, q, 0, _SAMPLE_RATE_HZ, _NUM_BINS, 1.0,
-                              np.zeros(_NUM_BINS), np.zeros(_NUM_BINS))
-    kernels.jammer_power(i, q, _POWER_THRESHOLD)
-    ev = np.array([0, 10], dtype=np.uint64)
-    pk = np.array([1.0, 2.0])
-    du = np.array([1e-7, 1e-7])
-    kernels.stats_accumulate(ev, pk, du, _SAMPLE_RATE_HZ, 0, 0.0, 0.0,
-                              float("inf"), float("-inf"), 0.0, 0, False, np.uint64(0))
-    kernels.deinterleave_events(ev, pk, _SAMPLE_RATE_HZ, _PRI_TOLERANCE_SECONDS, 0, 1,
-                                 np.zeros(4, dtype=np.uint32), np.zeros(4, dtype=np.int64),
-                                 np.zeros(4, dtype=np.uint64), np.zeros(4),
-                                 np.zeros(4, dtype=np.int64), np.zeros(4))
+    kernels.run_pipeline(
+        i, q, idx, offsets, _SAMPLE_RATE_HZ, _NUM_BINS, 1.0, 36.0,
+        _POWER_THRESHOLD, _DUTY_CYCLE_THRESHOLD, _PRI_TOLERANCE_SECONDS,
+        np.zeros(_NUM_BINS), np.zeros(_NUM_BINS),
+        np.zeros(16, dtype=np.uint32), np.zeros(16, dtype=np.int64),
+        np.zeros(16, dtype=np.uint64), np.zeros(16),
+        np.zeros(16, dtype=np.int64), np.zeros(16))
 
 
 def main() -> int:
@@ -83,132 +79,60 @@ def main() -> int:
     bin_hz = _SAMPLE_RATE_HZ / (2.0 * _NUM_BINS)
     threshold_sq = _THRESHOLD * _THRESHOLD
 
-    rng_state = 42
-    cursor = 0
-    batches = 0
-
-    in_pulse = False
-    pulse_start = 0
-    pulse_peak = 0.0
-    pulse_sum = 0.0
-    pulse_sample_count = 0
+    # Round three: the signal is a GIVEN (real IQ comes from a radio),
+    # so the whole signal is generated before the clock starts -- one
+    # generate_batch call for all of it (the generator's RNG and pulse
+    # phase flow continuously, so one call produces the same samples
+    # batching did) -- and the measured region begins at detection.
+    # offsets[b] marks where batch b starts in the flat arrays,
+    # preserving the exact batch boundaries every other build uses.
+    i_all, q_all, idx_all, _ = kernels.generate_batch(
+        0, total_samples, period, _GAP_SAMPLES, _PULSE_COMPONENT, _NOISE_AMPLITUDE, 42
+    )
+    offsets = np.arange(0, total_samples, _BATCH_SIZE, dtype=np.int64)
+    offsets = np.append(offsets, np.int64(total_samples))
 
     max_magnitude = np.zeros(_NUM_BINS)
     sum_magnitude = np.zeros(_NUM_BINS)
-    frame_count = 0
 
-    batches_total = 0
-    batches_flagged = 0
-    max_duty_cycle = 0.0
-    max_mean_power = 0.0
-
-    # Stats accumulator state, carried across batches -- same fields,
-    # same initial values as pulse_stats.PulseStatsAccumulator, now fed
-    # to the jitted stats_accumulate kernel (see kernels.py for why the
-    # last two stages got jitted in a second pass).
-    st_count = 0
-    st_peak_sum = 0.0
-    st_duration_sum = 0.0
-    st_peak_min = float("inf")
-    st_peak_max = float("-inf")
-    st_pri_sum = 0.0
-    st_pri_count = 0
-    st_have_prev = False
-    st_prev_start = np.uint64(0)
-
-    # Deinterleaver track state as parallel arrays for the jitted
-    # deinterleave_events kernel. Grown ahead of each call to the worst
-    # case (every event starts a new track) so the kernel never needs to
-    # reallocate.
-    track_capacity = 16
+    # Deinterleaver track state as parallel arrays. Capacity is a
+    # caller contract now that the batch loop lives inside the fused
+    # kernel (no per-batch growth point anymore): sized to this
+    # signal's true event bound -- at most one event per pulse period,
+    # since detection threshold 6.0 sits far above the noise floor --
+    # plus slack. run_pipeline aborts with batches_total == -1 rather
+    # than overflow if an input ever exceeds it.
+    track_capacity = num_pulses + 16
     track_id = np.zeros(track_capacity, dtype=np.uint32)
     track_pulse_count = np.zeros(track_capacity, dtype=np.int64)
     track_last_start = np.zeros(track_capacity, dtype=np.uint64)
     track_pri_sum = np.zeros(track_capacity)
     track_pri_count = np.zeros(track_capacity, dtype=np.int64)
     track_peak_sum = np.zeros(track_capacity)
-    track_count = 0
-    next_track_id = 1
 
-    # Timed region covers only the batch-processing loop, same convention
-    # as every other build in this repo -- JIT warm-up above and imports
-    # are excluded, so this reflects steady-state throughput.
+    # Timed region is ONE call: the entire detection-through-
+    # deinterleave loop runs inside the fused kernel (see kernels.py's
+    # run_pipeline -- profiling measured the interpreted glue between
+    # per-batch kernel calls at roughly two-thirds of this build's
+    # steady state, and this is what deletes it). JIT warm-up above and
+    # generation are excluded, same charter as every other build.
     steady_state_start = time.perf_counter()
-    while cursor < total_samples:
-        count = min(_BATCH_SIZE, total_samples - cursor)
-
-        i_arr, q_arr, idx_arr, rng_state = kernels.generate_batch(
-            cursor, count, period, _GAP_SAMPLES, _PULSE_COMPONENT, _NOISE_AMPLITUDE, rng_state
-        )
-
-        (ev_start, ev_end, ev_peak, ev_mean, ev_dur, in_pulse, pulse_start, pulse_peak,
-         pulse_sum, pulse_sample_count) = kernels.detect_pulses(
-            i_arr, q_arr, idx_arr, threshold_sq, _SAMPLE_RATE_HZ,
-            in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count,
-        )
-
-        max_magnitude, sum_magnitude = kernels.spectrogram_bins(
-            i_arr, q_arr, idx_arr[0], _SAMPLE_RATE_HZ, _NUM_BINS, bin_hz,
-            max_magnitude, sum_magnitude,
-        )
-        frame_count += 1
-
-        power_sum, over_threshold = kernels.jammer_power(i_arr, q_arr, _POWER_THRESHOLD)
-        mean_power = power_sum / count
-        duty_cycle = over_threshold / count
-        batches_total += 1
-        if duty_cycle >= _DUTY_CYCLE_THRESHOLD:
-            batches_flagged += 1
-        if duty_cycle > max_duty_cycle:
-            max_duty_cycle = duty_cycle
-        if mean_power > max_mean_power:
-            max_mean_power = mean_power
-
-        # Stats and deinterleaving consume the detector kernel's output
-        # arrays directly -- no protobuf anywhere in this loop. (An
-        # earlier version rebuilt a PulseEventBatch here purely to feed
-        # the pure-Python stats/deinterleaver; cProfile showed that
-        # rebuild plus those two interpreted stages were nearly all of
-        # this build's remaining steady-state time, so they became
-        # kernels too -- see kernels.py.)
-        (st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
-         st_pri_sum, st_pri_count, st_have_prev, st_prev_start) = kernels.stats_accumulate(
-            ev_start, ev_peak, ev_dur, _SAMPLE_RATE_HZ,
-            st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
-            st_pri_sum, st_pri_count, st_have_prev, st_prev_start,
-        )
-
-        # Worst case, every event starts a new track -- grow the state
-        # arrays up front so the kernel never has to. (At this repo's
-        # single-emitter scale track_count stays 1, so this never fires
-        # after the first sizing; it's here so the kernel stays correct
-        # for arbitrary inputs, same as the pure-Python version was.)
-        needed = track_count + len(ev_start)
-        if needed > track_capacity:
-            while track_capacity < needed:
-                track_capacity *= 2
-
-            def grow(arr):
-                grown = np.zeros(track_capacity, dtype=arr.dtype)
-                grown[: arr.shape[0]] = arr
-                return grown
-
-            track_id = grow(track_id)
-            track_pulse_count = grow(track_pulse_count)
-            track_last_start = grow(track_last_start)
-            track_pri_sum = grow(track_pri_sum)
-            track_pri_count = grow(track_pri_count)
-            track_peak_sum = grow(track_peak_sum)
-        track_count, next_track_id = kernels.deinterleave_events(
-            ev_start, ev_peak, _SAMPLE_RATE_HZ, _PRI_TOLERANCE_SECONDS,
-            track_count, next_track_id,
-            track_id, track_pulse_count, track_last_start,
-            track_pri_sum, track_pri_count, track_peak_sum,
-        )
-
-        cursor += count
-        batches += 1
+    (batches_total, frame_count, batches_flagged, max_duty_cycle, max_mean_power,
+     st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+     st_pri_sum, st_pri_count, track_count, next_track_id) = kernels.run_pipeline(
+        i_all, q_all, idx_all, offsets,
+        _SAMPLE_RATE_HZ, _NUM_BINS, bin_hz, threshold_sq,
+        _POWER_THRESHOLD, _DUTY_CYCLE_THRESHOLD, _PRI_TOLERANCE_SECONDS,
+        max_magnitude, sum_magnitude,
+        track_id, track_pulse_count, track_last_start,
+        track_pri_sum, track_pri_count, track_peak_sum,
+    )
     steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+
+    if batches_total < 0:
+        print("[numba_monolith_app.py] ERROR: track capacity exceeded", file=sys.stderr)
+        return 1
+    batches = batches_total
 
     print(
         f"[numba_monolith_app.py] processed {batches} IQ batches through 6 numba-jitted "

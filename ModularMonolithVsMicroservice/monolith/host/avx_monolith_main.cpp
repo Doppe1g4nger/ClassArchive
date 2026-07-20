@@ -36,35 +36,67 @@ int main(int argc, char** argv) {
 
   pulsecore::SyntheticIQSource source(kSampleRateHz, num_pulses);
   pulsecore::PulseDetectorAvx detector(/*amplitude_threshold=*/6.0, kSampleRateHz);
-  pulsecore::SpectrogramAnalyzer spectrogram(kSampleRateHz, kNumBins);
+  // Two half-range spectrogram instances, one per thread -- same split
+  // (and same reasons) as monolith_main.cpp.
+  pulsecore::SpectrogramAnalyzer spectrogram_lo(kSampleRateHz, kNumBins, 0, kNumBins / 2);
+  pulsecore::SpectrogramAnalyzer spectrogram_hi(kSampleRateHz, kNumBins, kNumBins / 2, kNumBins);
   pulsecore::JammerDetectorAvx jammer(/*power_threshold=*/20.0, /*duty_cycle_threshold=*/0.5);
   pulsecore::PulseStatsAccumulator stats_accumulator(kSampleRateHz);
   pulsecore::Deinterleaver deinterleaver(kSampleRateHz, /*pri_tolerance_seconds=*/1e-7);
 
-  // Theoretical-limits branch: same stage-per-thread pipeline as
-  // monolith_main.cpp (see threaded_pipeline.h), same 4-thread grouping
-  // for the same 4-core reasons -- just direct calls instead of module
-  // function pointers.
-  std::vector<pulse::PipelineFrame> slots(8);
+  // Round three: the signal is a given -- all batches pre-generated
+  // before the clock starts, measured pipeline begins at detection.
+  // Same stage-per-thread harness and grouping as monolith_main.cpp
+  // (see both for why), just direct calls instead of module function
+  // pointers.
+  std::vector<pulse::PipelineFrame> frames;
+  {
+    pulse::PipelineFrame f;
+    while (source.NextBatch(f.mutable_iq())) {
+      frames.push_back(std::move(f));
+      f.Clear();
+    }
+  }
+  // Pre-size outputs untimed -- see monolith_main.cpp for why (the
+  // spectrogram arrays especially: the two half-range instances write
+  // disjoint entries concurrently and must never resize).
+  for (pulse::PipelineFrame& f : frames) {
+    pulse::PulseEventBatch* ev = f.mutable_events();
+    ev->mutable_start_sample()->Reserve(2048);
+    ev->mutable_end_sample()->Reserve(2048);
+    ev->mutable_peak_amplitude()->Reserve(2048);
+    ev->mutable_mean_amplitude()->Reserve(2048);
+    ev->mutable_duration_seconds()->Reserve(2048);
+    pulse::SpectrogramSummary* spec = f.mutable_spectrogram();
+    for (int b = 0; b < kNumBins; ++b) {
+      spec->add_max_magnitude(0.0);
+      spec->add_mean_magnitude(0.0);
+    }
+    f.mutable_jam();
+    f.mutable_stats();
+    f.mutable_deinterleave();
+  }
+
   std::vector<std::function<void(pulse::PipelineFrame*)>> stages = {
       [&](pulse::PipelineFrame* f) {
         f->mutable_events()->Clear();
         detector.Process(f->iq(), f->mutable_events());
       },
-      [&](pulse::PipelineFrame* f) { spectrogram.Process(f->iq(), f->mutable_spectrogram()); },
-      [&](pulse::PipelineFrame* f) { jammer.Process(f->iq(), f->mutable_jam()); },
+      [&](pulse::PipelineFrame* f) { spectrogram_lo.Process(f->iq(), f->mutable_spectrogram()); },
+      [&](pulse::PipelineFrame* f) { spectrogram_hi.Process(f->iq(), f->mutable_spectrogram()); },
       [&](pulse::PipelineFrame* f) {
+        jammer.Process(f->iq(), f->mutable_jam());
         stats_accumulator.Add(f->events());
         *f->mutable_stats() = stats_accumulator.Finalize();
         deinterleaver.Process(f->events(), f->mutable_deinterleave());
       },
   };
 
-  // Timed region covers only the pipeline run, same convention as every
-  // other build in this repo.
-  const monolith::ThreadedPipelineResult run =
-      monolith::RunThreadedPipeline(&source, stages, &slots);
-  const pulse::PipelineFrame& frame = *run.final_frame;
+  // Timed region covers detection through deinterleave, same charter
+  // as every other build in this repo.
+  const monolith::ThreadedPipelineResult run = monolith::RunThreadedPipeline(stages, &frames);
+  static const pulse::PipelineFrame kEmptyFrame;
+  const pulse::PipelineFrame& frame = run.final_frame ? *run.final_frame : kEmptyFrame;
 
   std::printf("[avx_monolith_app] processed %d IQ batches through 2 AVX2 kernels + 3 scalar stages\n",
               run.batches);

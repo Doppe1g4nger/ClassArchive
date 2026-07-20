@@ -47,9 +47,9 @@ int main(int argc, char** argv) {
   std::printf("[deinterleave_service] stats_service connected\n");
 
   pulsecore::Deinterleaver deinterleaver(kSampleRateHz, kPriToleranceSeconds);
-  std::string payload;
-  // Reused across iterations for the same reason the plugin modules reuse
-  // theirs -- see pulse_detector_plugin.cpp.
+  // Reused across iterations for the same reason the plugin modules
+  // reuse theirs; no payload string -- zero-copy framing, see
+  // spectrogram_service/main.cpp.
   pulse::PipelineFrame frame;
   int frames_received = 0;
   // See spectrogram_service/main.cpp for why the timer starts on the
@@ -59,19 +59,15 @@ int main(int argc, char** argv) {
   std::chrono::steady_clock::time_point steady_state_start;
   std::chrono::steady_clock::time_point steady_state_end;
   bool started = false;
-  while (netutil::RecvMessage(upstream, &payload)) {
+  for (;;) {
+    // In-place clears before the in-slot merge-parse -- see
+    // spectrogram_service/main.cpp for the object-reuse story.
+    if (frame.has_iq()) frame.mutable_iq()->Clear();
+    if (frame.has_events()) frame.mutable_events()->Clear();
+    if (!netutil::RecvMessage(upstream, &frame)) break;
     if (!started) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
-    }
-    // In-place clear + merge-parse instead of ParseFromString() -- see
-    // spectrogram_service/main.cpp for why (reuses the parsed
-    // PulseEvent objects across batches instead of re-allocating them).
-    if (frame.has_iq()) frame.mutable_iq()->Clear();
-    if (frame.has_events()) frame.mutable_events()->Clear();
-    if (!frame.MergeFromString(payload)) {
-      std::fprintf(stderr, "[deinterleave_service] dropping malformed frame\n");
-      continue;
     }
     deinterleaver.Process(frame.events(), frame.mutable_deinterleave());
     ++frames_received;

@@ -123,15 +123,20 @@ def spectrogram_bins(i_arr, q_arr, first_sample_index, sample_rate_hz, num_bins,
                       max_magnitude, sum_magnitude):
     """JIT-compiled port of spectrogram.py's process() loop -- same
     phasor-rotation recursion per bin, same sequential re/im
-    accumulation within each bin. The *bins* run in parallel (prange):
-    each bin's correlator is fully independent -- its own phasor, its
-    own accumulators, its own output slots -- so threading them changes
-    nothing about any bin's operation order (fastmath may, though --
-    parity with the reference is tolerance-gated now, see the module
-    docstring, same as every other kernel here). This was the numba build's
-    largest remaining kernel by profile; parallel=True costs a
-    per-call thread handoff, which the before/after numbers in the
-    README weigh against the win."""
+    accumulation within each bin (fastmath may reorder within a bin --
+    parity with the reference is tolerance-gated, see the module
+    docstring, same as every other kernel here).
+
+    Round three moved the whole batch loop into one fused driver
+    kernel (run_pipeline below) and A/B-tested this kernel's
+    parallel=True inside it, expecting the per-batch thread handoff to
+    stop paying once the Python glue around it was gone. Measured
+    result: the opposite -- 5.2ms fused+parallel vs 14ms fused+serial
+    (vs 22ms unfused+parallel). With the glue deleted, the spectrogram
+    is most of what remains, and threading its 8 independent bins from
+    inside compiled code keeps the whole speedup the handoff used to
+    dilute. The wrong-way prediction is kept in the README as part of
+    the round's ledger."""
     n = i_arr.shape[0]
     pi = 3.14159265358979323846
 
@@ -271,3 +276,106 @@ def deinterleave_events(ev_start, ev_peak, sample_rate_hz, pri_tolerance_seconds
         track_pulse_count[target] += 1
 
     return track_count, next_track_id
+
+
+@njit(cache=True, fastmath=True)
+def run_pipeline(i_all, q_all, idx_all, offsets,
+                 sample_rate_hz, num_bins, bin_hz, threshold_sq,
+                 power_threshold, duty_cycle_threshold, pri_tolerance_seconds,
+                 max_magnitude, sum_magnitude,
+                 track_id, track_pulse_count, track_last_start,
+                 track_pri_sum, track_pri_count, track_peak_sum):
+    """Round three's fused driver: the entire batch loop, compiled.
+
+    Profiling round three measured the numba build's kernels at ~8ms of
+    its ~22ms steady state -- the rest was the Python driver loop
+    between them: tuple packing/unpacking, slice bookkeeping, branch
+    glue, 51 times over. This kernel IS that loop, so the per-batch
+    boundary between compiled and interpreted code is gone; the app
+    makes one call for the whole run.
+
+    Inputs are the pre-generated signal as flat arrays plus offsets[b]
+    marking each batch's start (offsets has batches+1 entries; the
+    signal is a given on this branch -- see the app). Track capacity is
+    a caller contract: if a batch would need more track slots than
+    track_id has, the run aborts and returns batches_total == -1
+    rather than write out of bounds -- the caller sizes the arrays to
+    its input's event bound and treats -1 as a hard error.
+
+    Returns every piece of cross-batch state the app prints:
+    (batches_total, frame_count, batches_flagged, max_duty_cycle,
+     max_mean_power, st_count, st_peak_sum, st_duration_sum,
+     st_peak_min, st_peak_max, st_pri_sum, st_pri_count,
+     track_count, next_track_id)."""
+    in_pulse = False
+    pulse_start = np.uint64(0)
+    pulse_peak = 0.0
+    pulse_sum = 0.0
+    pulse_sample_count = 0
+
+    frame_count = 0
+    batches_total = 0
+    batches_flagged = 0
+    max_duty_cycle = 0.0
+    max_mean_power = 0.0
+
+    st_count = 0
+    st_peak_sum = 0.0
+    st_duration_sum = 0.0
+    st_peak_min = np.inf
+    st_peak_max = -np.inf
+    st_pri_sum = 0.0
+    st_pri_count = 0
+    st_have_prev = False
+    st_prev_start = np.uint64(0)
+
+    track_count = 0
+    next_track_id = 1
+
+    for b in range(offsets.shape[0] - 1):
+        s0 = offsets[b]
+        s1 = offsets[b + 1]
+        i_arr = i_all[s0:s1]
+        q_arr = q_all[s0:s1]
+        idx_arr = idx_all[s0:s1]
+        n = s1 - s0
+
+        (ev_start, ev_end, ev_peak, ev_mean, ev_dur, in_pulse, pulse_start, pulse_peak,
+         pulse_sum, pulse_sample_count) = detect_pulses(
+            i_arr, q_arr, idx_arr, threshold_sq, sample_rate_hz,
+            in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count)
+
+        spectrogram_bins(i_arr, q_arr, idx_arr[0], sample_rate_hz, num_bins, bin_hz,
+                         max_magnitude, sum_magnitude)
+        frame_count += 1
+
+        power_sum, over_threshold = jammer_power(i_arr, q_arr, power_threshold)
+        mean_power = power_sum / n
+        duty_cycle = over_threshold / n
+        batches_total += 1
+        if duty_cycle >= duty_cycle_threshold:
+            batches_flagged += 1
+        if duty_cycle > max_duty_cycle:
+            max_duty_cycle = duty_cycle
+        if mean_power > max_mean_power:
+            max_mean_power = mean_power
+
+        (st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+         st_pri_sum, st_pri_count, st_have_prev, st_prev_start) = stats_accumulate(
+            ev_start, ev_peak, ev_dur, sample_rate_hz,
+            st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+            st_pri_sum, st_pri_count, st_have_prev, st_prev_start)
+
+        if track_count + ev_start.shape[0] > track_id.shape[0]:
+            return (-1, frame_count, batches_flagged, max_duty_cycle, max_mean_power,
+                    st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+                    st_pri_sum, st_pri_count, track_count, next_track_id)
+        track_count, next_track_id = deinterleave_events(
+            ev_start, ev_peak, sample_rate_hz, pri_tolerance_seconds,
+            track_count, next_track_id,
+            track_id, track_pulse_count, track_last_start,
+            track_pri_sum, track_pri_count, track_peak_sum)
+
+    return (batches_total, frame_count, batches_flagged, max_duty_cycle, max_mean_power,
+            st_count, st_peak_sum, st_duration_sum, st_peak_min, st_peak_max,
+            st_pri_sum, st_pri_count, track_count, next_track_id)

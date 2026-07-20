@@ -3,6 +3,12 @@
 #include <cstdint>
 #include <string>
 
+namespace google {
+namespace protobuf {
+class MessageLite;
+}  // namespace protobuf
+}  // namespace google
+
 namespace netutil {
 
 // Theoretical-limits branch: the chain's transport is a shared-memory
@@ -55,6 +61,24 @@ Channel* Connect(const std::string& host, uint16_t port);
 // Deadline for the measured incident behind this).
 bool SendMessage(Channel* ch, const std::string& payload);
 bool RecvMessage(Channel* ch, std::string* payload);
+
+// Zero-copy variants (theoretical-limits round three): the message
+// serializes DIRECTLY into the ring slot and parses DIRECTLY out of
+// it, eliminating the intermediate std::string entirely. Profiling
+// caught what that string was costing the string-based path per hop:
+// std::string::resize zero-fills the ~200KB payload before serialize
+// overwrites it, then the bytes are copied once into the slot on send
+// and once out of it on receive -- memcpy+memset were ~47% of the
+// chain's pacing service's instructions. Send fails (false) if the
+// serialized size can't fit a slot.
+//
+// RecvMessage parses with MERGE semantics, matching the in-place
+// clear + merge-parse pattern every service already uses (see
+// spectrogram_service/main.cpp): the caller clears the repeated-field
+// carriers it knows about, then calls this, and parsed content lands
+// in the cached, already-allocated objects.
+bool SendMessage(Channel* ch, const google::protobuf::MessageLite& message);
+bool RecvMessage(Channel* ch, google::protobuf::MessageLite* message);
 
 // Producer close publishes end-of-stream; consumer close unmaps and
 // unlinks the segment. Safe to call once per side.

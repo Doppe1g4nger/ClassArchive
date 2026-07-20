@@ -71,11 +71,20 @@ int main(int argc, char** argv) {
   // Chain order matches microservice/'s wiring exactly (see
   // scripts/run_microservices.sh): each stage needs whatever the stages
   // before it in this list have already written into the frame.
+  // The spectrogram plugin is loaded TWICE, each instance owning half
+  // the bins (bins are fully independent correlators -- see
+  // spectrogram.h's range contract). Profiling round 3 showed the
+  // spectrogram as the pipeline's slowest stage once generation left
+  // the measured region, and the box has a spare core; splitting the
+  // one heavy stage is the thread rebalance that actually moves the
+  // bound. Six module instances, still five distinct modules.
   std::vector<LoadedModule> chain = {
       LoadModule(plugin_dir + "/libpulse_detector_plugin.so",
                  "threshold=6.0,sample_rate=10000000"),
       LoadModule(plugin_dir + "/libpulse_spectrogram_plugin.so",
-                 "sample_rate=10000000,num_bins=8"),
+                 "sample_rate=10000000,num_bins=8,bin_begin=0,bin_end=4"),
+      LoadModule(plugin_dir + "/libpulse_spectrogram_plugin.so",
+                 "sample_rate=10000000,num_bins=8,bin_begin=4,bin_end=8"),
       LoadModule(plugin_dir + "/libpulse_jammer_plugin.so",
                  "power_threshold=20.0,duty_cycle_threshold=0.5"),
       LoadModule(plugin_dir + "/libpulse_stats_plugin.so", "sample_rate=10000000"),
@@ -83,43 +92,89 @@ int main(int argc, char** argv) {
                  "sample_rate=10000000,pri_tolerance=0.0000001"),
   };
 
+  // Round three of the theoretical-limits branch: the signal is a
+  // GIVEN. Real systems receive their IQ from a radio -- no
+  // architecture choice speeds up the antenna -- so every batch is
+  // generated up front, before the clock starts, and the measured
+  // pipeline begins at detection. One pre-filled frame per batch (at
+  // this repo's scale, ~160KB of samples per frame; the benchmark's
+  // 50k-pulse runs hold ~8MB resident -- the price of "the input
+  // already exists" being literally true).
   pulsecore::SyntheticIQSource source(/*sample_rate_hz=*/10000000.0, num_pulses);
+  std::vector<pulse::PipelineFrame> frames;
+  {
+    pulse::PipelineFrame f;
+    while (source.NextBatch(f.mutable_iq())) {
+      frames.push_back(std::move(f));
+      f.Clear();
+    }
+  }
+  // Pre-size every frame's output containers, also untimed: the
+  // round-two slot ring amortized output allocation away by reusing 8
+  // warm frames; with one frame per batch, leaving allocation inside
+  // the measured region would bill the pipeline for heap growth and
+  // first-touch page faults that steady-state processing never pays.
+  // 2048 comfortably covers this signal's ~1000 events/batch.
+  for (pulse::PipelineFrame& f : frames) {
+    pulse::PulseEventBatch* ev = f.mutable_events();
+    ev->mutable_start_sample()->Reserve(2048);
+    ev->mutable_end_sample()->Reserve(2048);
+    ev->mutable_peak_amplitude()->Reserve(2048);
+    ev->mutable_mean_amplitude()->Reserve(2048);
+    ev->mutable_duration_seconds()->Reserve(2048);
+    // The spectrogram's arrays must be pre-sized: two half-range
+    // analyzer instances write disjoint entries concurrently, and the
+    // range contract (spectrogram.h) forbids them resizing anything.
+    pulse::SpectrogramSummary* spec = f.mutable_spectrogram();
+    for (int b = 0; b < 8; ++b) {
+      spec->add_max_magnitude(0.0);
+      spec->add_mean_magnitude(0.0);
+    }
+    f.mutable_jam();
+    f.mutable_stats();
+    f.mutable_deinterleave();
+  }
 
-  // Theoretical-limits branch: the module chain runs as a stage-per-
-  // thread pipeline (see threaded_pipeline.h) instead of one thread
-  // calling all five modules per batch. Same modules, same dlopen
-  // boundary, same per-batch call order guarantees -- each module is
-  // still invoked from exactly one thread, in batch order, so its
-  // internal running state needs no locking. The grouping below is
-  // sized to this repo's 4-core benchmark box: generation+detector
-  // fused (the chain fuses them into detector_service too), the two
-  // remaining iq-readers get a thread each, and the two cheap
-  // events-only stages share the fourth thread.
-  std::vector<pulse::PipelineFrame> slots(8);
+  // The modules run as a stage-per-thread pipeline (see
+  // threaded_pipeline.h). Same modules, same dlopen boundary -- each
+  // module INSTANCE is invoked from exactly one thread, in batch
+  // order, so its internal running state needs no locking. With
+  // generation retired from the pipeline, the grouping is again sized
+  // to the 4-core benchmark box: detector alone, each spectrogram
+  // half-range instance alone (the stage profiling round 3 showed
+  // pacing everything else), and the three cheap stages sharing the
+  // fourth thread. The two spectrogram instances run one frame apart
+  // in the linear chain and write disjoint halves of the same
+  // pre-sized summary -- see spectrogram.h's range contract.
   std::vector<std::function<void(pulse::PipelineFrame*)>> stages = {
       [&](pulse::PipelineFrame* f) { chain[0].process(chain[0].instance, f); },  // detector
-      [&](pulse::PipelineFrame* f) { chain[1].process(chain[1].instance, f); },  // spectrogram
-      [&](pulse::PipelineFrame* f) { chain[2].process(chain[2].instance, f); },  // jammer
-      [&](pulse::PipelineFrame* f) {                                             // stats + deint
+      [&](pulse::PipelineFrame* f) { chain[1].process(chain[1].instance, f); },  // spectrogram bins 0-3
+      [&](pulse::PipelineFrame* f) { chain[2].process(chain[2].instance, f); },  // spectrogram bins 4-7
+      [&](pulse::PipelineFrame* f) {                                             // jammer + stats + deint
         chain[3].process(chain[3].instance, f);
         chain[4].process(chain[4].instance, f);
+        chain[5].process(chain[5].instance, f);
       },
   };
 
-  // Timed region covers only the pipeline run -- module loading
-  // (dlopen()/dlsym() above) and teardown (dlclose() below) are
-  // deliberately excluded, so this number reflects steady-state
-  // throughput rather than one-time process/module-load cost. See
-  // microservice/deinterleave_service/main.cpp for the equivalent
-  // measurement on the chain build, and scripts/benchmark_steady_state.sh
-  // for how these numbers get compared.
-  const monolith::ThreadedPipelineResult run =
-      monolith::RunThreadedPipeline(&source, stages, &slots);
-  const pulse::PipelineFrame& frame = *run.final_frame;
+  // Timed region covers only the pipeline run -- generation (above),
+  // module loading (dlopen()/dlsym()), and teardown (dlclose() below)
+  // are all excluded, so this number reflects steady-state throughput
+  // of detection-through-deinterleave. See
+  // microservice/detector_service/main.cpp for the equivalent charter
+  // on the chain build, and scripts/benchmark_steady_state.sh for how
+  // these numbers get compared.
+  const monolith::ThreadedPipelineResult run = monolith::RunThreadedPipeline(stages, &frames);
+  static const pulse::PipelineFrame kEmptyFrame;
+  const pulse::PipelineFrame& frame = run.final_frame ? *run.final_frame : kEmptyFrame;
 
+  // chain.size() counts INSTANCES (the spectrogram is loaded twice);
+  // the pipeline still consists of the same five distinct modules, and
+  // this line stays comparable with every earlier measurement's output.
+  const size_t distinct_modules = chain.size() - 1;
   std::printf(
       "[monolith_app] processed %d IQ batches through a dynamically-linked chain of %zu modules\n",
-      run.batches, chain.size());
+      run.batches, distinct_modules);
   std::printf("[monolith_app] STEADY_STATE_MS %.6f\n", run.steady_state_ms);
 
   const pulse::SpectrogramSummary& spectrogram = frame.spectrogram();

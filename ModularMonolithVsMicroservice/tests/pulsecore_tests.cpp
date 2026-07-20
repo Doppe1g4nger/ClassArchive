@@ -393,6 +393,40 @@ void TestSpectrogramRunningState() {
   CHECK_EQ_D(out.mean_magnitude(2), tone_mag / 2.0);
 }
 
+// Two half-range analyzer instances writing disjoint halves of one
+// pre-sized summary must together produce what one full-range instance
+// does -- the contract the threaded monoliths' split spectrogram stage
+// rests on (see spectrogram.h).
+void TestSpectrogramRangeSplitMatchesFull() {
+  constexpr int kBins = 8;
+  pulsecore::SpectrogramAnalyzer full(kSampleRateHz, kBins);
+  pulsecore::SpectrogramAnalyzer lo(kSampleRateHz, kBins, 0, kBins / 2);
+  pulsecore::SpectrogramAnalyzer hi(kSampleRateHz, kBins, kBins / 2, kBins);
+
+  pulse::SpectrogramSummary full_out;
+  pulse::SpectrogramSummary split_out;
+  for (int b = 0; b < kBins; ++b) {
+    split_out.add_max_magnitude(0.0);  // range contract: pre-sized
+    split_out.add_mean_magnitude(0.0);
+  }
+
+  pulsecore::SyntheticIQSource source(kSampleRateHz, 2000);
+  pulse::IQBatch batch;
+  while (source.NextBatch(&batch)) {
+    full.Process(batch, &full_out);
+    lo.Process(batch, &split_out);
+    hi.Process(batch, &split_out);
+  }
+
+  CHECK(split_out.frame_count() == full_out.frame_count());
+  CHECK_EQ_D(split_out.bin_hz(), full_out.bin_hz());
+  CHECK(split_out.max_magnitude_size() == full_out.max_magnitude_size());
+  for (int b = 0; b < kBins; ++b) {
+    CHECK_EQ_D(split_out.max_magnitude(b), full_out.max_magnitude(b));
+    CHECK_EQ_D(split_out.mean_magnitude(b), full_out.mean_magnitude(b));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // netutil framing
 // ---------------------------------------------------------------------------
@@ -546,6 +580,7 @@ int main() {
   TestDeinterleaverTwoEmitters();
   TestSpectrogramToneLandsInItsBin();
   TestSpectrogramRunningState();
+  TestSpectrogramRangeSplitMatchesFull();
   TestFramingRoundTrip();
 #ifdef HAVE_AVX_VARIANT
   TestAvxDetectorMatchesScalarExactly();

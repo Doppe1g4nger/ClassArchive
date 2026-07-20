@@ -49,9 +49,9 @@ int main(int argc, char** argv) {
   std::printf("[stats_service] jammer_service connected\n");
 
   pulsecore::PulseStatsAccumulator accumulator(kSampleRateHz);
-  std::string payload;
-  // Reused across iterations for the same reason the plugin modules reuse
-  // theirs -- see pulse_detector_plugin.cpp.
+  // Reused across iterations for the same reason the plugin modules
+  // reuse theirs; no payload string -- zero-copy framing, see
+  // spectrogram_service/main.cpp.
   pulse::PipelineFrame frame;
   // Kept separately from frame because frame.stats() gets cleared before
   // every forward (see below) -- this is what gets printed after the
@@ -63,21 +63,15 @@ int main(int argc, char** argv) {
   std::chrono::steady_clock::time_point steady_state_start;
   std::chrono::steady_clock::time_point steady_state_end;
   bool started = false;
-  while (netutil::RecvMessage(upstream, &payload)) {
+  for (;;) {
+    // In-place clears before the in-slot merge-parse -- see
+    // spectrogram_service/main.cpp for the object-reuse story.
+    if (frame.has_iq()) frame.mutable_iq()->Clear();
+    if (frame.has_events()) frame.mutable_events()->Clear();
+    if (!netutil::RecvMessage(upstream, &frame)) break;
     if (!started) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
-    }
-    // In-place clear + merge-parse instead of ParseFromString(), so the
-    // parsed PulseEvent objects (~1,000/batch -- iq was already stripped
-    // upstream) get reused across batches instead of destroyed and
-    // re-allocated by the non-merge parse's implicit Clear() -- see
-    // spectrogram_service/main.cpp for the full story.
-    if (frame.has_iq()) frame.mutable_iq()->Clear();
-    if (frame.has_events()) frame.mutable_events()->Clear();
-    if (!frame.MergeFromString(payload)) {
-      std::fprintf(stderr, "[stats_service] dropping malformed frame\n");
-      continue;
     }
     accumulator.Add(frame.events());
     *frame.mutable_stats() = accumulator.Finalize();
@@ -89,8 +83,7 @@ int main(int argc, char** argv) {
     // every batch -- see jammer_service/main.cpp.
     frame.mutable_stats()->Clear();
 
-    frame.SerializeToString(&payload);
-    if (!netutil::SendMessage(downstream, payload)) {
+    if (!netutil::SendMessage(downstream, frame)) {
       std::fprintf(stderr,
                     "[stats_service] forward failed, deinterleave_service may have exited\n");
       break;

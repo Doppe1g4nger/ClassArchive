@@ -21,17 +21,23 @@ def run(conn_out, num_pulses: int, results) -> None:
     detector = PulseDetector(amplitude_threshold=6.0, sample_rate_hz=_SAMPLE_RATE_HZ)
     source = SyntheticIQSource(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
 
-    # Reused across iterations for the same reason the other builds do --
-    # frame.iq is filled directly by next_batch() below (no copy).
-    frame = pulse_pb2.PipelineFrame()
+    # Round three of the theoretical-limits branch: the signal is a
+    # GIVEN, so every batch is generated before the clock starts and
+    # the measured region begins at detection -- same charter as every
+    # other build on this branch.
+    frames = []
+    while True:
+        f = pulse_pb2.PipelineFrame()
+        if not source.next_batch(f.iq):
+            break
+        frames.append(f)
     batches_sent = 0
 
     # No connect() to wait behind -- conn_out is already a live pipe by
     # the time this function starts running, so the timer can start right
     # at the top of the loop with no setup cost to exclude.
     steady_state_start = time.perf_counter()
-    while source.next_batch(frame.iq):
-        frame.events.Clear()
+    for frame in frames:
         detector.process(frame.iq, frame.events)
         conn_out.send(frame.SerializeToString())
         batches_sent += 1

@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover
 
 try:
     from numpy_variant import kernels as numpy_kernels
+    from numpy_variant.aggregates import DeinterleaverArrays, PulseStatsArrays
     from numpy_variant.iq_source_arrays import SyntheticIQSourceArrays
 except ImportError:  # pragma: no cover
     numpy_kernels = None
@@ -307,6 +308,52 @@ class TestNumpyKernelParity(unittest.TestCase):
             total += 1
         self.assertEqual(out.batches_total, total)
         self.assertLess(abs(max_mean_power - out.max_mean_power) / out.max_mean_power, 1e-12)
+
+    def test_array_aggregates_match_reference(self):
+        # aggregates.py's array-native stats/deinterleaver vs the
+        # pulsecore reference pair, fed identical detector output.
+        # Counts and track structure exact; accumulated doubles within
+        # tolerance (the stats sums are reordered/telescoped by design
+        # -- see aggregates.py's docstring).
+        from pulsecore.pulse_stats import PulseStatsAccumulator
+        from pulsecore.deinterleaver import Deinterleaver
+
+        ref_det = PulseDetector(amplitude_threshold=6.0, sample_rate_hz=SAMPLE_RATE_HZ)
+        ref_stats = PulseStatsAccumulator(sample_rate_hz=SAMPLE_RATE_HZ)
+        ref_deint = Deinterleaver(sample_rate_hz=SAMPLE_RATE_HZ, pri_tolerance_seconds=1e-7)
+        ref_deint_out = pulse_pb2.DeinterleaveSummary()
+
+        arr_stats = PulseStatsArrays(sample_rate_hz=SAMPLE_RATE_HZ)
+        arr_deint = DeinterleaverArrays(sample_rate_hz=SAMPLE_RATE_HZ, pri_tolerance_seconds=1e-7)
+
+        state = (False, 0, 0.0, 0.0, 0)
+        for batch, i, q, idx in reference_batches():
+            events = pulse_pb2.PulseEventBatch()
+            ref_det.process(batch, events)
+            ref_stats.add(events)
+            ref_deint.process(events, ref_deint_out)
+            (ev_start, ev_end, ev_peak, ev_mean, ev_dur, *state) = numpy_kernels.detect_pulses(
+                i, q, idx, 36.0, SAMPLE_RATE_HZ, *state
+            )
+            arr_stats.add(ev_start, ev_peak, ev_dur)
+            arr_deint.process(ev_start, ev_peak)
+
+        ref_summary = ref_stats.finalize()
+        arr_summary = arr_stats.finalize()
+        self.assertEqual(ref_summary.pulse_count, arr_summary.pulse_count)
+        assert_close(self, ref_summary.mean_peak_amplitude, arr_summary.mean_peak_amplitude)
+        assert_close(self, ref_summary.mean_duration_seconds, arr_summary.mean_duration_seconds)
+        assert_close(self, ref_summary.min_peak_amplitude, arr_summary.min_peak_amplitude)
+        assert_close(self, ref_summary.max_peak_amplitude, arr_summary.max_peak_amplitude)
+        assert_close(self, ref_summary.mean_pri_seconds, arr_summary.mean_pri_seconds)
+
+        arr_out = arr_deint.summary()
+        self.assertEqual(len(ref_deint_out.tracks), len(arr_out.tracks))
+        for ref_track, arr_track in zip(ref_deint_out.tracks, arr_out.tracks):
+            self.assertEqual(ref_track.track_id, arr_track.track_id)
+            self.assertEqual(ref_track.pulse_count, arr_track.pulse_count)
+            assert_close(self, ref_track.estimated_pri_seconds, arr_track.estimated_pri_seconds)
+            assert_close(self, ref_track.mean_peak_amplitude, arr_track.mean_peak_amplitude)
 
 
 if __name__ == "__main__":

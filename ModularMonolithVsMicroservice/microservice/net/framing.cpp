@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include <google/protobuf/io/coded_stream.h>
+#include <google/protobuf/message_lite.h>
+
 namespace netutil {
 
 namespace {
@@ -187,49 +190,103 @@ Channel* Connect(const std::string& /*host*/, uint16_t port) {
   return ch;
 }
 
-bool SendMessage(Channel* ch, const std::string& payload) {
-  if (ch == nullptr || ch->closed) return false;
-  if (payload.size() + sizeof(uint32_t) > kSlotSize) return false;
-  RingHeader* h = ch->hdr;
+namespace {
 
+// Waits for a writable slot. Returns its base address (length word
+// first, body after) or nullptr on timeout/closed channel; *head_out
+// is the sequence number to publish with after the slot is filled.
+uint8_t* AcquireSendSlot(Channel* ch, uint64_t* head_out) {
+  if (ch == nullptr || ch->closed) return nullptr;
+  RingHeader* h = ch->hdr;
   const uint64_t head = h->head.load(std::memory_order_relaxed);
   int spins = 0;
   Deadline deadline;
   while (head - h->tail.load(std::memory_order_acquire) >= kSlotCount) {
-    if (deadline.Expired()) return false;  // consumer stopped draining: treat as peer gone
+    if (deadline.Expired()) return nullptr;  // consumer stopped draining: treat as peer gone
     WaitPause(spins);
   }
-
-  uint8_t* slot = ch->slots + (head & (kSlotCount - 1)) * size_t(kSlotSize);
-  const uint32_t len = static_cast<uint32_t>(payload.size());
-  std::memcpy(slot, &len, sizeof(len));
-  std::memcpy(slot + sizeof(len), payload.data(), len);
-  h->head.store(head + 1, std::memory_order_release);
-  return true;
+  *head_out = head;
+  return ch->slots + (head & (kSlotCount - 1)) * size_t(kSlotSize);
 }
 
-bool RecvMessage(Channel* ch, std::string* payload) {
-  if (ch == nullptr || ch->closed) return false;
+// Waits for a readable slot. Returns its base address or nullptr on
+// end-of-stream/timeout; *tail_out is the sequence number to publish
+// with after the slot's contents have been consumed.
+const uint8_t* AcquireRecvSlot(Channel* ch, uint64_t* tail_out) {
+  if (ch == nullptr || ch->closed) return nullptr;
   RingHeader* h = ch->hdr;
-
   const uint64_t tail = h->tail.load(std::memory_order_relaxed);
   int spins = 0;
   Deadline deadline;
   while (tail == h->head.load(std::memory_order_acquire)) {
     if (h->writer_done.load(std::memory_order_acquire) != 0 &&
         tail == h->head.load(std::memory_order_acquire)) {
-      return false;  // drained and producer closed: end of stream
+      return nullptr;  // drained and producer closed: end of stream
     }
-    if (deadline.Expired()) return false;  // producer died without its FIN: treat as peer close
+    if (deadline.Expired()) return nullptr;  // producer died without its FIN: treat as peer close
     WaitPause(spins);
   }
+  *tail_out = tail;
+  return ch->slots + (tail & (kSlotCount - 1)) * size_t(kSlotSize);
+}
 
-  const uint8_t* slot = ch->slots + (tail & (kSlotCount - 1)) * size_t(kSlotSize);
+}  // namespace
+
+bool SendMessage(Channel* ch, const std::string& payload) {
+  if (payload.size() + sizeof(uint32_t) > kSlotSize) return false;
+  uint64_t head = 0;
+  uint8_t* slot = AcquireSendSlot(ch, &head);
+  if (slot == nullptr) return false;
+  const uint32_t len = static_cast<uint32_t>(payload.size());
+  std::memcpy(slot, &len, sizeof(len));
+  std::memcpy(slot + sizeof(len), payload.data(), len);
+  ch->hdr->head.store(head + 1, std::memory_order_release);
+  return true;
+}
+
+bool RecvMessage(Channel* ch, std::string* payload) {
+  uint64_t tail = 0;
+  const uint8_t* slot = AcquireRecvSlot(ch, &tail);
+  if (slot == nullptr) return false;
   uint32_t len = 0;
   std::memcpy(&len, slot, sizeof(len));
   payload->assign(reinterpret_cast<const char*>(slot + sizeof(len)), len);
-  h->tail.store(tail + 1, std::memory_order_release);
+  ch->hdr->tail.store(tail + 1, std::memory_order_release);
   return true;
+}
+
+bool SendMessage(Channel* ch, const google::protobuf::MessageLite& message) {
+  // Serialize straight into the slot: no intermediate string, so no
+  // zero-fill of a resized payload buffer and no second copy -- see
+  // framing.h. ByteSizeLong is required before SerializeToArray
+  // anyway (it caches the sizes the serializer reuses), so the size
+  // check is free.
+  const size_t size = message.ByteSizeLong();
+  if (size + sizeof(uint32_t) > kSlotSize) return false;
+  uint64_t head = 0;
+  uint8_t* slot = AcquireSendSlot(ch, &head);
+  if (slot == nullptr) return false;
+  const uint32_t len = static_cast<uint32_t>(size);
+  std::memcpy(slot, &len, sizeof(len));
+  if (!message.SerializeToArray(slot + sizeof(len), static_cast<int>(size))) return false;
+  ch->hdr->head.store(head + 1, std::memory_order_release);
+  return true;
+}
+
+bool RecvMessage(Channel* ch, google::protobuf::MessageLite* message) {
+  uint64_t tail = 0;
+  const uint8_t* slot = AcquireRecvSlot(ch, &tail);
+  if (slot == nullptr) return false;
+  uint32_t len = 0;
+  std::memcpy(&len, slot, sizeof(len));
+  // Merge-parse directly from the slot (the caller pre-cleared its
+  // repeated-field carriers -- framing.h documents the contract). The
+  // slot can't be recycled by the producer until tail is published
+  // below, so parsing in place is race-free.
+  google::protobuf::io::CodedInputStream in(slot + sizeof(len), static_cast<int>(len));
+  const bool ok = message->MergeFromCodedStream(&in) && in.ConsumedEntireMessage();
+  ch->hdr->tail.store(tail + 1, std::memory_order_release);
+  return ok;
 }
 
 void Close(Channel* ch) {

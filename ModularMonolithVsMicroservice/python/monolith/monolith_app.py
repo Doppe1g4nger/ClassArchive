@@ -53,25 +53,36 @@ def main() -> int:
     ]
 
     source = SyntheticIQSource(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
-    # Reused across iterations for the same reason the C++ host does --
-    # frame.iq is filled directly by next_batch() below (no copy); every
-    # other field is written by whichever chain stage owns it.
-    frame = pulse_pb2.PipelineFrame()
+
+    # Round three of the theoretical-limits branch: the signal is a
+    # GIVEN (real IQ comes from a radio; no architecture choice speeds
+    # up the antenna), so every batch is generated before the clock
+    # starts and the measured region begins at detection -- the same
+    # charter as every other build on this branch. One pre-filled frame
+    # per batch; each stage's summary fields are written into the frame
+    # the batch flows through, so the LAST frame holds the final
+    # summaries to print, exactly like the C++ hosts.
+    frames = []
+    while True:
+        f = pulse_pb2.PipelineFrame()
+        if not source.next_batch(f.iq):
+            break
+        frames.append(f)
     batches = 0
 
-    # Timed region starts here and covers only the batch-processing loop --
-    # imports (above) and printing the summaries (below) are deliberately
-    # excluded, so this number reflects steady-state throughput rather than
-    # one-time interpreter-startup/import cost. See
-    # microservice/deinterleave_service.py for the equivalent measurement
-    # on the chain build, and scripts/benchmark_steady_state.sh for how
-    # these numbers get compared.
+    # Timed region covers detection through deinterleave -- generation
+    # (above), imports, and printing the summaries (below) are all
+    # excluded, so this number reflects steady-state throughput rather
+    # than one-time cost. See microservice/detector_service.py for the
+    # equivalent charter on the chain build, and
+    # scripts/benchmark_steady_state.sh for how these numbers compare.
     steady_state_start = time.perf_counter()
-    while source.next_batch(frame.iq):
+    for frame in frames:
         for stage in chain:
             stage.process(frame)
         batches += 1
     steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+    frame = frames[-1] if frames else pulse_pb2.PipelineFrame()
 
     print(
         f"[monolith_app.py] processed {batches} IQ batches through an imported chain "

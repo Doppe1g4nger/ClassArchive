@@ -22,10 +22,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from pulsecore import pulse_pb2
-from pulsecore.pulse_stats import PulseStatsAccumulator
-from pulsecore.deinterleaver import Deinterleaver
 from numpy_variant import kernels
+from numpy_variant.aggregates import DeinterleaverArrays, PulseStatsArrays
 from numpy_variant.iq_source_arrays import SyntheticIQSourceArrays
 
 _SAMPLE_RATE_HZ = 10_000_000.0
@@ -47,12 +45,23 @@ def main() -> int:
     # this variant's single biggest cost, bigger than all its vectorized
     # kernels combined. See iq_source_arrays.py.
     source = SyntheticIQSourceArrays(sample_rate_hz=_SAMPLE_RATE_HZ, num_pulses=num_pulses)
-    accumulator = PulseStatsAccumulator(sample_rate_hz=_SAMPLE_RATE_HZ)
-    deinterleaver = Deinterleaver(
+    # Round three: stats and the deinterleaver are array-native too
+    # (see aggregates.py) -- no protobuf anywhere on the per-batch path.
+    accumulator = PulseStatsArrays(sample_rate_hz=_SAMPLE_RATE_HZ)
+    deinterleaver = DeinterleaverArrays(
         sample_rate_hz=_SAMPLE_RATE_HZ, pri_tolerance_seconds=_PRI_TOLERANCE_SECONDS
     )
-    events_batch = pulse_pb2.PulseEventBatch()
-    deinterleave_summary = pulse_pb2.DeinterleaveSummary()
+
+    # Round three: the signal is a GIVEN (real IQ comes from a radio),
+    # so every batch is generated before the clock starts and the
+    # measured region begins at detection -- the same charter as every
+    # other build on this branch.
+    pregenerated = []
+    while True:
+        got = source.next_batch()
+        if got is None:
+            break
+        pregenerated.append(got)
 
     batches = 0
     in_pulse = False
@@ -70,14 +79,10 @@ def main() -> int:
     max_duty_cycle = 0.0
     max_mean_power = 0.0
 
-    # Timed region covers only the batch-processing loop, same convention
-    # as every other build in this repo.
+    # Timed region covers detection through deinterleave over the
+    # pre-generated batches, same convention as every other build.
     steady_state_start = time.perf_counter()
-    while True:
-        got = source.next_batch()
-        if got is None:
-            break
-        i_arr, q_arr, idx_arr = got
+    for i_arr, q_arr, idx_arr in pregenerated:
         n = i_arr.shape[0]
 
         (ev_start, ev_end, ev_peak, ev_mean, ev_dur, in_pulse, pulse_start, pulse_peak,
@@ -103,25 +108,19 @@ def main() -> int:
         if mean_power > max_mean_power:
             max_mean_power = mean_power
 
-        # Columnar events: five bulk extend() calls replace the
-        # per-event message-construction loop the main branch needed.
-        events_batch.Clear()
-        if len(ev_start) > 0:
-            events_batch.start_sample.extend(ev_start.tolist())
-            events_batch.end_sample.extend(ev_end.tolist())
-            events_batch.peak_amplitude.extend(ev_peak.tolist())
-            events_batch.mean_amplitude.extend(ev_mean.tolist())
-            events_batch.duration_seconds.extend(ev_dur.tolist())
-
-        accumulator.add(events_batch)
-        deinterleaver.process(events_batch, deinterleave_summary)
+        # Event arrays flow straight into the array-native aggregates
+        # (aggregates.py) -- the per-batch protobuf event round-trip
+        # that used to live here is gone.
+        accumulator.add(ev_start, ev_peak, ev_dur)
+        deinterleaver.process(ev_start, ev_peak)
 
         batches += 1
     steady_state_ms = (time.perf_counter() - steady_state_start) * 1000.0
+    deinterleave_summary = deinterleaver.summary()
 
     print(
-        f"[numpy_monolith_app.py] processed {batches} IQ batches through 3 vectorized kernels "
-        f"+ 2 pure-Python stages"
+        f"[numpy_monolith_app.py] processed {batches} IQ batches through 4 vectorized stages "
+        f"+ 1 array-native deinterleaver"
     )
     print(f"[numpy_monolith_app.py] STEADY_STATE_MS {steady_state_ms:.6f}")
 

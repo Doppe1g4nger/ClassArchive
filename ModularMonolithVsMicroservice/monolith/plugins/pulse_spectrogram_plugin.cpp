@@ -12,7 +12,8 @@
 namespace {
 
 struct SpectrogramModule {
-  SpectrogramModule(double sample_rate_hz, int num_bins) : analyzer(sample_rate_hz, num_bins) {}
+  SpectrogramModule(double sample_rate_hz, int num_bins, int bin_begin, int bin_end)
+      : analyzer(sample_rate_hz, num_bins, bin_begin, bin_end) {}
   pulsecore::SpectrogramAnalyzer analyzer;
 };
 
@@ -23,10 +24,21 @@ extern "C" {
 pulse_module_t pulse_module_create(const char* config) {
   double sample_rate_hz = 10000000.0;
   int num_bins = 8;
+  // Optional bin range (theoretical-limits branch): lets the host load
+  // this plugin twice and split the stage's independent bins across
+  // two threads -- see spectrogram.h's range/output contract. Absent
+  // (the default), one instance owns all bins, exactly as before.
+  int bin_begin = -1;
+  int bin_end = -1;
   if (config != nullptr) {
-    std::sscanf(config, "sample_rate=%lf,num_bins=%d", &sample_rate_hz, &num_bins);
+    if (std::sscanf(config, "sample_rate=%lf,num_bins=%d,bin_begin=%d,bin_end=%d",
+                    &sample_rate_hz, &num_bins, &bin_begin, &bin_end) < 4) {
+      bin_begin = -1;
+      bin_end = -1;
+      std::sscanf(config, "sample_rate=%lf,num_bins=%d", &sample_rate_hz, &num_bins);
+    }
   }
-  return new SpectrogramModule(sample_rate_hz, num_bins);
+  return new SpectrogramModule(sample_rate_hz, num_bins, bin_begin, bin_end);
 }
 
 void pulse_module_destroy(pulse_module_t handle) {

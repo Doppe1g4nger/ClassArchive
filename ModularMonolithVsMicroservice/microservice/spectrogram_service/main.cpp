@@ -48,9 +48,10 @@ int main(int argc, char** argv) {
   std::printf("[spectrogram_service] detector_service connected\n");
 
   pulsecore::SpectrogramAnalyzer analyzer(kSampleRateHz, kNumBins);
-  std::string payload;
   // Reused across iterations for the same reason the plugin modules reuse
-  // theirs -- see pulse_detector_plugin.cpp.
+  // theirs -- see pulse_detector_plugin.cpp. No payload string anymore:
+  // round three's zero-copy framing serializes/parses directly in the
+  // ring slots (see framing.h).
   pulse::PipelineFrame frame;
   // Kept separately from frame because frame.spectrogram() gets cleared
   // before every forward (see below) -- this is what "received/forwarded
@@ -69,34 +70,25 @@ int main(int argc, char** argv) {
   std::chrono::steady_clock::time_point steady_state_start;
   std::chrono::steady_clock::time_point steady_state_end;
   bool started = false;
-  while (netutil::RecvMessage(upstream, &payload)) {
+  for (;;) {
+    // Clear the two big repeated-field carriers *in place* BEFORE the
+    // merge-parse (which now happens inside RecvMessage, straight from
+    // the ring slot). The reasoning is the max-opt branch's: a
+    // non-merge parse would run the generated Clear() first, and for
+    // singular message fields that Clear() *deletes* the submessage
+    // outright, destroying and re-heap-allocating every parsed object
+    // each batch (callgrind measured that churn at ~45% of this
+    // process's instructions before the fix). In-place Clear() zeroes
+    // and CACHES; the merge lands in the cached objects. The upstream
+    // stages only ever send iq/events (each stage strips its own
+    // summary before forwarding), so these two clears cover everything
+    // the wire can carry here.
+    if (frame.has_iq()) frame.mutable_iq()->Clear();
+    if (frame.has_events()) frame.mutable_events()->Clear();
+    if (!netutil::RecvMessage(upstream, &frame)) break;
     if (!started) {
       steady_state_start = std::chrono::steady_clock::now();
       started = true;
-    }
-    // Clear the two big repeated-field carriers *in place*, then parse
-    // with merge semantics, instead of a plain ParseFromString(). A
-    // non-merge parse runs the generated Clear() first, and for
-    // singular message fields that Clear() *deletes* the submessage
-    // outright (see pulse.pb.cc's PipelineFrame::Clear()) -- so every
-    // batch used to destroy and re-heap-allocate all 10,000 parsed
-    // IQSample objects, which callgrind measured as ~45% of this
-    // process's instructions (DestroyProtos + CreateMaybeMessage +
-    // malloc/free). RepeatedPtrField::Clear(), by contrast, zeroes its
-    // elements and *caches* them for the next Add(), so clearing the
-    // repeated fields ourselves and merge-parsing on top reuses the
-    // same 10,000 objects batch after batch. Merging into a cleared
-    // element is value-identical to parsing into a fresh one -- Clear()
-    // zeroes every field, and proto3 merge overwrites scalars and
-    // appends to (empty) repeated fields -- verified by output diff,
-    // not just argued. The upstream stages only ever send iq/events
-    // (each stage strips its own summary before forwarding), so these
-    // two clears cover everything the wire can carry here.
-    if (frame.has_iq()) frame.mutable_iq()->Clear();
-    if (frame.has_events()) frame.mutable_events()->Clear();
-    if (!frame.MergeFromString(payload)) {
-      std::fprintf(stderr, "[spectrogram_service] dropping malformed frame\n");
-      continue;
     }
     analyzer.Process(frame.iq(), frame.mutable_spectrogram());
     last_summary = frame.spectrogram();
@@ -111,8 +103,8 @@ int main(int argc, char** argv) {
     // present-but-empty field is 2 bytes.
     frame.mutable_spectrogram()->Clear();
 
-    frame.SerializeToString(&payload);
-    if (!netutil::SendMessage(downstream, payload)) {
+    // Zero-copy forward: serializes directly into the downstream slot.
+    if (!netutil::SendMessage(downstream, frame)) {
       std::fprintf(stderr, "[spectrogram_service] forward failed, jammer_service may have exited\n");
       break;
     }
