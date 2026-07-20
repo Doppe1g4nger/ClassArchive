@@ -1,15 +1,32 @@
 """Small-bin magnitude spectrum estimator -- Python port of
 common/src/spectrogram.cpp / common/include/spectrogram.h.
 
-Includes the phasor-rotation optimization from that file's history: a
-running complex value is rotated by one fixed multiply per sample instead
-of calling cos()/sin() for every sample. Reintroducing the naive
-cos()/sin()-per-sample version here would conflate "Python is slower at
-calling library functions in a loop" with "Python is slower at plain
-arithmetic in a loop" -- porting the already-optimized algorithm keeps the
-comparison to the latter, which is the more meaningful one.
+Theoretical-limits branch, round four: this port now uses the same
+cached phase tables its C++ and numpy counterparts adopted rounds ago
+-- and in CPython the payoff is structural, not arithmetic. With the
+per-batch phasor factored OUT of the sum (sum(s_k * r0 * t_k) ==
+r0 * sum(s_k * t_k)), each bin's whole correlator becomes
+
+    sum(map(mul, samples, table), 0j) * r0
+
+which runs entirely inside the interpreter's C internals: map()
+iterates at C speed, complex.__mul__ multiplies at C speed, sum()
+accumulates at C speed. The earlier phasor-recursion version -- kept
+faithful to the C++ history and bit-identical to it -- executed two
+interpreted bytecode statements per sample per bin; this version
+executes zero. That bit-identical claim is the price: the table
+entries are computed fresh from cos/sin instead of accumulated by
+repeated complex multiply (less rounding drift, in fact), and the
+factored r0 rounds once at the end, so parity with the C++ analyzer
+is tolerance-level now -- which is this branch's contract everywhere
+(printed outputs are unchanged at their 3-decimal precision, and the
+variant parity tests gate the kernels against this reference at 1e-9).
+
+The summation order is unchanged (sequential over samples), so this is
+a rounding-level change, not a reordering.
 """
 import math
+from operator import mul
 
 from pulsecore import pulse_pb2
 
@@ -24,34 +41,32 @@ class SpectrogramAnalyzer:
         self._max_magnitude = [0.0] * num_bins
         self._sum_magnitude = [0.0] * num_bins
         self._frame_count = 0
+        # Per-batch-length cache of per-bin offset phasor tables
+        # e^{-j*omega*k}, exactly like the C++ analyzer's table_n_
+        # members -- this repo's signal has two batch lengths, so the
+        # trig runs twice per process lifetime.
+        self._tables: dict[int, list[list[complex]]] = {}
 
     def process(self, batch: "pulse_pb2.IQBatch", out: "pulse_pb2.SpectrogramSummary") -> None:
         n = len(batch.i)
         if n > 0:
             first_sample_index = batch.first_sample_index
 
-            # Read every sample out of the protobuf message exactly once,
-            # into plain Python complex numbers, instead of once per bin
-            # -- the loop below runs this batch's samples through all
-            # num_bins correlators, and s.i/s.q are protobuf-generated
-            # property accessors, not free attribute reads the way a C++
-            # struct member is (a C++ compiler would hoist the redundant
-            # reads automatically; CPython won't, so it's done by hand).
-            #
-            # complex, not an (i, q) pair, because the correlator's inner
-            # loop *is* complex arithmetic: the four-multiply/two-add
-            # update below is exactly (i + jq) * rot, and the phasor
-            # advance is exactly rot * step. CPython evaluates a complex
-            # product in C with the same component formulas the expanded
-            # scalar code used -- (ac - bd) + j(ad + bc), same operations,
-            # same order, verified bit-identical against the scalar
-            # version, not just assumed -- so this halves the interpreted
-            # bytecode per sample without changing a single output bit.
-            # cProfile put this loop at 51% of the whole monolith's
-            # runtime, which is what made it worth this treatment.
-            # (Packed columnar layout: zip over two bulk list() copies
-            # of the packed arrays, no per-sample message access.)
+            # One bulk read of the packed arrays into plain complex
+            # numbers (protobuf accessors are not free attribute reads;
+            # see this file's history of the same hoist).
             samples_c = [complex(si, qi) for si, qi in zip(batch.i, batch.q)]
+
+            tables = self._tables.get(n)
+            if tables is None:
+                tables = []
+                for b in range(self._num_bins):
+                    omega = 2.0 * _PI * ((b + 0.5) * self._bin_hz) / self._sample_rate_hz
+                    tables.append(
+                        [complex(math.cos(omega * k), -math.sin(omega * k)) for k in range(n)]
+                    )
+                self._tables[n] = tables
+
             max_magnitude = self._max_magnitude
             sum_magnitude = self._sum_magnitude
             cos = math.cos
@@ -59,27 +74,15 @@ class SpectrogramAnalyzer:
             sqrt = math.sqrt
 
             for b in range(self._num_bins):
-                freq_hz = (b + 0.5) * self._bin_hz
-                omega = 2.0 * _PI * freq_hz / self._sample_rate_hz
-
-                # Seed the phasor at this batch's first sample_index, then
-                # advance it by one fixed complex multiply per sample
-                # instead of recomputing cos()/sin() from scratch each
-                # time -- see the module docstring.
+                omega = 2.0 * _PI * ((b + 0.5) * self._bin_hz) / self._sample_rate_hz
                 start_phase = omega * first_sample_index
-                rot = complex(cos(start_phase), -sin(start_phase))
-                step = complex(cos(omega), -sin(omega))
+                r0 = complex(cos(start_phase), -sin(start_phase))
 
-                acc = 0j
-                for s in samples_c:
-                    acc += s * rot
-                    rot *= step
+                # The entire correlator, at C speed -- see the module
+                # docstring. Sequential accumulation, same order as the
+                # explicit loop it replaced.
+                acc = sum(map(mul, samples_c, tables[b]), 0j) * r0
 
-                # Not abs(acc): CPython's complex abs() goes through
-                # hypot(), which rounds differently than the explicit
-                # sqrt-of-sum-of-squares the scalar version used --
-                # keeping the exact expression keeps the output
-                # bit-identical.
                 re = acc.real
                 im = acc.imag
                 magnitude = sqrt(re * re + im * im) / n

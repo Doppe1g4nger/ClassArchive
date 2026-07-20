@@ -30,8 +30,17 @@ message IQBatch {
 // main branch's `repeated PulseEvent` paid one heap object plus message
 // framing per event (~1,000/batch at this repo's scale).
 message PulseEventBatch {
-  repeated uint64 start_sample = 1;
-  repeated uint64 end_sample = 2;
+  // fixed64, not uint64 (theoretical-limits round four): varint
+  // coding of these two arrays -- ~2,000 variable-width decodes and
+  // size computations per batch -- showed up as ~15% of the chain's
+  // pacing service's instructions under callgrind. fixed64 makes them
+  // memcpy-class on the wire like the three double arrays below, at
+  // the cost of 8 bytes each instead of 3-4 (sample indices at this
+  // repo's scale fit in 3 varint bytes): ~9KB more wire per batch,
+  // paid to a transport that is a memcpy into shared memory. The
+  // in-memory API type is unchanged (uint64).
+  repeated fixed64 start_sample = 1;
+  repeated fixed64 end_sample = 2;
   repeated double peak_amplitude = 3;
   repeated double mean_amplitude = 4;
   repeated double duration_seconds = 5;

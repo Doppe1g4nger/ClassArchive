@@ -118,50 +118,65 @@ def detect_pulses(i_arr, q_arr, idx_arr, threshold_sq, sample_rate_hz,
             ev_dur[:n_events], in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count)
 
 
+@njit(cache=True, fastmath=True)
+def build_phase_tables(num_bins, n, bin_hz, sample_rate_hz):
+    """Per-bin offset phasor tables e^{-j*omega*k} for spectrogram_bins
+    -- the same factoring the C++ and numpy spectrograms have used
+    since the max-optimization branch: the absolute phase
+    omega*(first+k) splits into a per-batch scalar phasor
+    e^{-j*omega*first} times this cached, batch-length-dependent table.
+    The caller (run_pipeline, or a test) caches per batch length; this
+    repo's signal has exactly two lengths, so it's built twice."""
+    pi = 3.14159265358979323846
+    table_re = np.empty((num_bins, n))
+    table_im = np.empty((num_bins, n))
+    for b in range(num_bins):
+        omega = 2.0 * pi * ((b + 0.5) * bin_hz) / sample_rate_hz
+        for k in range(n):
+            table_re[b, k] = np.cos(omega * k)
+            table_im[b, k] = -np.sin(omega * k)
+    return table_re, table_im
+
+
 @njit(cache=True, parallel=True, fastmath=True)
 def spectrogram_bins(i_arr, q_arr, first_sample_index, sample_rate_hz, num_bins, bin_hz,
-                      max_magnitude, sum_magnitude):
-    """JIT-compiled port of spectrogram.py's process() loop -- same
-    phasor-rotation recursion per bin, same sequential re/im
-    accumulation within each bin (fastmath may reorder within a bin --
-    parity with the reference is tolerance-gated, see the module
-    docstring, same as every other kernel here).
-
-    Round three moved the whole batch loop into one fused driver
-    kernel (run_pipeline below) and A/B-tested this kernel's
-    parallel=True inside it, expecting the per-batch thread handoff to
-    stop paying once the Python glue around it was gone. Measured
-    result: the opposite -- 5.2ms fused+parallel vs 14ms fused+serial
-    (vs 22ms unfused+parallel). With the glue deleted, the spectrogram
-    is most of what remains, and threading its 8 independent bins from
-    inside compiled code keeps the whole speedup the handoff used to
-    dilute. The wrong-way prediction is kept in the README as part of
-    the round's ledger."""
+                      table_re, table_im, max_magnitude, sum_magnitude):
+    """JIT-compiled spectrogram correlator, round four: the phasor
+    RECURSION the earlier rounds compiled as-is is gone, replaced by
+    the phase-table form the C++ and numpy sides have used since the
+    max-optimization branch. Round-four profiling showed this kernel
+    as the numba build's long pole (3.2ms of the 4.6ms driver) and the
+    recursion as the reason: each sample's rotation depended on the
+    previous sample's, a loop-carried dependency no vectorizer can
+    break. With the rotation looked up from the cached table instead
+    (see build_phase_tables), the inner loop is a pure multiply-add
+    over four contiguous arrays -- exactly what LLVM's vectorizer
+    wants -- on top of the same 8-way bin parallelism (prange; the
+    round-three A/B that proved parallel=True earns its keep inside
+    the fused driver still stands). Parity with the pure-Python
+    recursion is tolerance-gated at 1e-9 (reassociation changes the
+    reduction order -- the same gate the numpy variant's identical
+    rework has always used)."""
     n = i_arr.shape[0]
-    pi = 3.14159265358979323846
 
     for b in prange(num_bins):
-        freq_hz = (b + 0.5) * bin_hz
-        omega = 2.0 * pi * freq_hz / sample_rate_hz
-
+        pi = 3.14159265358979323846
+        omega = 2.0 * pi * ((b + 0.5) * bin_hz) / sample_rate_hz
         start_phase = omega * first_sample_index
-        rot_re = np.cos(start_phase)
-        rot_im = -np.sin(start_phase)
-        step_re = np.cos(omega)
-        step_im = -np.sin(omega)
+        r0_re = np.cos(start_phase)
+        r0_im = -np.sin(start_phase)
 
         re = 0.0
         im = 0.0
         for k in range(n):
+            tr = table_re[b, k]
+            ti = table_im[b, k]
+            rot_re = r0_re * tr - r0_im * ti
+            rot_im = r0_re * ti + r0_im * tr
             si = i_arr[k]
             qi = q_arr[k]
             re += si * rot_re - qi * rot_im
             im += si * rot_im + qi * rot_re
-
-            next_re = rot_re * step_re - rot_im * step_im
-            next_im = rot_re * step_im + rot_im * step_re
-            rot_re = next_re
-            rot_im = next_im
 
         magnitude = np.sqrt(re * re + im * im) / n
         if magnitude > max_magnitude[b]:
@@ -332,6 +347,13 @@ def run_pipeline(i_all, q_all, idx_all, offsets,
     track_count = 0
     next_track_id = 1
 
+    # Spectrogram phase tables, cached per batch length exactly like
+    # the C++ analyzer's table_n_ member -- this signal has two
+    # lengths (full batch + tail), so the trig runs twice per run.
+    table_n = -1
+    table_re = np.empty((0, 0))
+    table_im = np.empty((0, 0))
+
     for b in range(offsets.shape[0] - 1):
         s0 = offsets[b]
         s1 = offsets[b + 1]
@@ -345,8 +367,11 @@ def run_pipeline(i_all, q_all, idx_all, offsets,
             i_arr, q_arr, idx_arr, threshold_sq, sample_rate_hz,
             in_pulse, pulse_start, pulse_peak, pulse_sum, pulse_sample_count)
 
+        if n != table_n:
+            table_n = n
+            table_re, table_im = build_phase_tables(num_bins, n, bin_hz, sample_rate_hz)
         spectrogram_bins(i_arr, q_arr, idx_arr[0], sample_rate_hz, num_bins, bin_hz,
-                         max_magnitude, sum_magnitude)
+                         table_re, table_im, max_magnitude, sum_magnitude)
         frame_count += 1
 
         power_sum, over_threshold = jammer_power(i_arr, q_arr, power_threshold)

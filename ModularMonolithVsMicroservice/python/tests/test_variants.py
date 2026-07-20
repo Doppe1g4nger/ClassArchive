@@ -113,7 +113,11 @@ class TestNumbaKernelParity(unittest.TestCase):
                 assert_close(self, expected.mean_amplitude[k], ev_mean[k])
                 assert_close(self, expected.duration_seconds[k], ev_dur[k])
 
-    def test_spectrogram_bit_identical(self):
+    def test_spectrogram_within_tolerance(self):
+        # 1e-9 gate rather than assert_close's 1e-12: round four moved
+        # this kernel to the phase-table + vectorized-reduction form,
+        # so like the numpy variant's identical rework it reassociates
+        # the per-bin sums -- same gate that variant has always used.
         num_bins = 8
         bin_hz = SAMPLE_RATE_HZ / (2.0 * num_bins)
         ref = SpectrogramAnalyzer(sample_rate_hz=SAMPLE_RATE_HZ, num_bins=num_bins)
@@ -121,15 +125,22 @@ class TestNumbaKernelParity(unittest.TestCase):
         max_mag = np.zeros(num_bins)
         sum_mag = np.zeros(num_bins)
         frames = 0
+        tables = {}
         for batch, i, q, idx in reference_batches():
             ref.process(batch, out)
+            n = i.shape[0]
+            if n not in tables:
+                tables[n] = numba_kernels.build_phase_tables(num_bins, n, bin_hz, SAMPLE_RATE_HZ)
+            tre, tim = tables[n]
             max_mag, sum_mag = numba_kernels.spectrogram_bins(
-                i, q, idx[0], SAMPLE_RATE_HZ, num_bins, bin_hz, max_mag, sum_mag
+                i, q, idx[0], SAMPLE_RATE_HZ, num_bins, bin_hz, tre, tim, max_mag, sum_mag
             )
             frames += 1
         for b in range(num_bins):
-            assert_close(self, out.max_magnitude[b], max_mag[b])
-            assert_close(self, out.mean_magnitude[b], sum_mag[b] / frames)
+            self.assertLess(abs(max_mag[b] - out.max_magnitude[b]) / out.max_magnitude[b], 1e-9)
+            self.assertLess(
+                abs(sum_mag[b] / frames - out.mean_magnitude[b]) / out.mean_magnitude[b], 1e-9
+            )
 
     def test_jammer_bit_identical(self):
         ref = JammerDetector(power_threshold=20.0, duty_cycle_threshold=0.5)
