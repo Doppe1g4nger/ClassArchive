@@ -206,7 +206,8 @@
 >
 > Detection-through-deinterleave medians (20x50k, same machine, same
 > run; round-2 numbers included generation, so columns aren't directly
-> comparable -- that's the point of the recharter):
+> comparable -- that's the point of the recharter; round four's final
+> column follows below):
 >
 > | build | round 2 (incl. gen) | round 3 (detection on) |
 > |---|---:|---:|
@@ -231,6 +232,59 @@
 > detector_service (its gen+detect fusion is gone but it still paces
 > the chain; another process is another hop, and the chain's problem
 > is hops).
+>
+> ---
+>
+> ### Round four: three candidates from the last profile, all three kept
+>
+> One more profiling pass named each build's long pole; the three
+> tractable ones were tried, measured, and all survived:
+>
+> - **numba's phase-table spectrogram**: the kernel was the build's
+>   long pole (3.2ms of 4.6) and still used the phasor recursion -- a
+>   loop-carried dependency no vectorizer can break -- while C++ and
+>   numpy had used cached phase tables for rounds. Ported: the kernel
+>   alone went **3.16 -> 1.05ms** (the predicted 3x), though the
+>   driver only went 5.2 -> 4.8ms -- the freed time exposed the next
+>   layer (per-batch event-array allocations and 51 parallel-region
+>   entries), which is how these ledgers always end.
+> - **`fixed64` sample indices on the wire**: callgrind had varint
+>   coding of the two event-index arrays at ~15% of the chain's pacing
+>   service's instructions; `fixed64` makes them memcpy-class like the
+>   double arrays. ~9KB more wire per batch, paid to a transport that
+>   is a memcpy. Modest, real: ~0.3ms off quiet-run chain medians.
+> - **Phase tables in the pure-Python spectrogram** -- the round's
+>   surprise. In CPython the tables' win is structural, not
+>   arithmetic: factoring the per-batch phasor out of the sum turns
+>   each bin's correlator into `sum(map(mul, samples, table)) * r0`,
+>   which runs entirely inside the interpreter's C internals -- zero
+>   interpreted bytecode per sample, where the old (already-optimized)
+>   complex recursion executed two statements per sample. Python
+>   monolith **474 -> 366ms**; the microservice and multiproc builds
+>   share the module and dropped to 230/246ms.
+>
+> Final medians (20x50k, detection-through-deinterleave):
+>
+> | build | round 3 | round 4 |
+> |---|---:|---:|
+> | C++ monolith | 3.4ms | 3.3ms |
+> | C++ monolith (AVX2) | 3.6ms | **3.2ms** |
+> | C++ microservices | 9.6ms | 10.8ms (noisy mid-run; min 6.0) |
+> | Python numba | 5.2ms | **4.8ms** |
+> | Python numpy | 65.7ms | 62.1ms |
+> | Python monolith | 474ms | **366ms** |
+> | Python microservices | 333ms | **230ms** |
+> | Python multiproc | 349ms | **246ms** |
+>
+> Where each build's long pole now sits, per the closing profile: the
+> C++ monolith is balance-bound across four full cores (every further
+> split needs a fifth); the chain's remaining cost is protobuf's own
+> parse/serialize copies -- the step past that is not serializing,
+> which is the monolith; numba's is its driver's allocation and
+> parallel-region overhead (~2ms of glue around ~2ms of kernels);
+> numpy's is interpreter dispatch spread thin across a dozen call
+> sites; the pure-Python builds' is that they are pure Python, which
+> is the comparison working as intended.
 
 > ## ⚡ Inherited: the `claude/max-optimization` banner
 >
