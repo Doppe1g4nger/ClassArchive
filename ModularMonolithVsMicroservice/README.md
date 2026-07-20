@@ -149,6 +149,88 @@
 > different repo, not a rounding of this one). Everything else priced
 > across five optimization rounds is either applied above or measured,
 > reverted, and written down as a negative result.
+>
+> ---
+>
+> ### Round three: the signal is a given
+>
+> Round two's ledger reopened under one revised premise: **in the real
+> system this repo caricatures, IQ samples arrive from a radio -- no
+> architecture choice makes the antenna faster.** So every build now
+> generates its full signal *before* the steady-state clock starts,
+> and the measured region begins at detection: the first stage that is
+> actually this system's job. (The price of "the input already exists"
+> being literally true is that it's resident -- ~8MB at benchmark
+> scale, held by whichever process feeds the pipeline.) Every
+> remaining profiled cost was then attacked:
+>
+> - **C++ monoliths**: the pipeline harness runs stages over the
+>   pre-generated frames (per-batch frames, outputs pre-sized untimed)
+>   with an explicit backpressure window -- its brief absence measured
+>   ~3x slower, the fastest stage sprinting ahead and every stage
+>   behind it reading stone-cold memory; round two's slot ring had
+>   provided the cap implicitly. With generation gone the spectrogram
+>   became the pacing stage, so it's now **two half-range analyzer
+>   instances on two threads** (bins are independent correlators; each
+>   instance writes its own half of a pre-sized summary, the bin-0
+>   owner writes the scalars -- one writer per field, no locks, and
+>   the dlopen build does it by loading the same plugin twice with a
+>   bin-range config). Thread pinning was tried and REVERTED: 6.2ms
+>   pinned vs 4.7ms unpinned median -- on a shared container, pinning
+>   traps a stage on whichever core the neighbors are loading.
+> - **C++ chain**: zero-copy ring framing -- Send/Recv overloads that
+>   serialize a message directly INTO the ring slot and merge-parse
+>   directly OUT of it. The payload string they delete was costing
+>   each hop a ~200KB zero-fill (std::string::resize before serialize)
+>   plus one copy in and one copy out; profiling had memcpy+memset at
+>   ~47% of the pacing service's instructions.
+> - **numpy**: the two never-ported stages got ported. Stats is now
+>   vectorized (with one part *better* than vectorized: the intra-batch
+>   PRI sum telescopes -- consecutive-gap sums collapse to
+>   (last-first)/rate, exactly, in integer sample indices -- so it's
+>   O(1)); the deinterleaver went array-native (its sequential loop is
+>   the algorithm -- each event's track match depends on means updated
+>   by the previous event -- but the protobuf event batch built every
+>   batch solely to feed both stages is gone). ~40% faster
+>   like-for-like.
+> - **numba**: the entire batch loop moved into one fused @njit driver
+>   kernel -- profiling put the interpreted glue between per-batch
+>   kernel calls at roughly two-thirds of this build's steady state.
+>   And a prediction died in the A/B: round two guessed the
+>   spectrogram's parallel=True handoff "costs more than it buys";
+>   fused, it's 5.2ms WITH parallel vs 14ms without. The handoff was
+>   never the problem -- the glue it was buried in was.
+> - **Pure-Python builds**: pre-generation only. The GIL forecloses
+>   in-process threading, and the multiproc build already is the
+>   process-parallel experiment.
+>
+> Detection-through-deinterleave medians (20x50k, same machine, same
+> run; round-2 numbers included generation, so columns aren't directly
+> comparable -- that's the point of the recharter):
+>
+> | build | round 2 (incl. gen) | round 3 (detection on) |
+> |---|---:|---:|
+> | C++ monolith | 4.3ms | **3.4ms** |
+> | C++ monolith (AVX2) | 4.6ms | **3.6ms** |
+> | C++ microservices | 10.6ms | 9.6ms |
+> | Python numba | 22.0ms | **5.2ms** |
+> | Python numpy | 107.8ms | **65.7ms** |
+> | Python monolith | 808ms | 474ms |
+> | Python microservices | 437ms | 333ms |
+> | Python multiproc | 460ms | 349ms |
+>
+> The closing picture: the C++ threaded monolith processes one second
+> of signal-time per ~68ms of wall time, 3.4ms per 50k pulses -- and
+> **numba lands at 5.2ms, within 1.5x of C++**, the whole Python tax
+> compiled away once no interpreted code remained on the per-batch
+> path. The chain sits at 2.8x the monolith: with transport zero-copy
+> and generation out of the picture, what remains really is the
+> irreducible cost of the architecture -- serialize, hop, parse, five
+> times -- against stages that now cost ~3ms total. Still on no table:
+> everything round two listed, plus splitting the chain's
+> detector_service (its gen+detect fusion is gone but it still paces
+> the chain; another process is another hop, and the chain's problem
+> is hops).
 
 > ## ⚡ Inherited: the `claude/max-optimization` banner
 >
