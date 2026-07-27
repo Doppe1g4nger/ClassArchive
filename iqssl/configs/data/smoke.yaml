@@ -1,0 +1,4 @@
+root: data/smoke
+split_variant: iid
+primary_label: emitter
+crop_len: null   # null uses the preset's crop_len from the manifest

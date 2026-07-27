@@ -1,0 +1,6 @@
+# The CPU smoke encoder. Held identical across every method -- the encoder is
+# the control variable, so it is configured here and never by a method.
+name: vit1d
+args:
+  size: tiny
+  patch_size: 16

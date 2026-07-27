@@ -1,0 +1,10 @@
+name: supcon
+args:
+  temperature: 0.1
+  proj_hidden: 2048
+  proj_dim: 128
+  pool: cls
+train:
+  optimizer: lars
+  base_lr: 0.3
+  weight_decay: 1.0e-6

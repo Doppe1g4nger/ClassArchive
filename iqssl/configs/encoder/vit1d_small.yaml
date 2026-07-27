@@ -1,0 +1,4 @@
+name: vit1d
+args:
+  size: small
+  patch_size: 16

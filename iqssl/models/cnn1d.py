@@ -42,7 +42,6 @@ class BasicBlock1D(nn.Module):
         return self.act(self.bn2(self.conv2(out)) + identity)
 
 
-@ENCODERS.register("cnn1d")
 class ResNet1D(nn.Module):
     """Residual 1D CNN over ``(B, 2, L)`` IQ, global-average pooled."""
 
@@ -103,7 +102,16 @@ CNN_SIZES: dict[str, dict] = {
 }
 
 
-def cnn1d(size: str = "r18", **kwargs) -> ResNet1D:
+@ENCODERS.register("cnn1d")
+def cnn1d(size: str = "r18", seq_len: int | None = None, **kwargs) -> ResNet1D:
+    """Named size shortcut.
+
+    ``seq_len`` is accepted and ignored. ResNet1D is fully convolutional and
+    global-average pools, so it has no fixed input length -- but the loop builds
+    every encoder through one call signature, and special-casing which encoders
+    take a length would put the branch back in exactly the place the design keeps
+    it out of.
+    """
     if size not in CNN_SIZES:
         raise ValueError(f"unknown CNN size {size!r}; options: {sorted(CNN_SIZES)}")
     return ResNet1D(**{**CNN_SIZES[size], **kwargs})

@@ -1,0 +1,13 @@
+name: simsiam
+args:
+  proj_hidden: 2048
+  proj_dim: 2048
+  pred_hidden: 512
+  pool: cls
+# SGD, per the paper. The predictor is held out of cosine decay via fix_lr --
+# one of the few genuinely load-bearing details in SimSiam: decaying it
+# measurably collapses the representation.
+train:
+  optimizer: sgd
+  base_lr: 0.05
+  weight_decay: 1.0e-4

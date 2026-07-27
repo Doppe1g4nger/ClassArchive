@@ -1,9 +1,10 @@
 """Stage-4 tests: view transforms, policies, and masking.
 
-The important test in this file is
-:func:`test_hardware_invariant_destroys_the_fingerprint`. Everything else checks
-that ops are well-behaved; that one checks that the benchmark's central claim is
-actually implemented, and it is written so it *can* fail.
+The tests that matter are in :class:`TestPositiveControl`. Everything else
+checks that ops are well-behaved; those check that the benchmark's central design
+claim -- that `standard` varies channel nuisances while `hardware_invariant`
+varies the label -- is actually implemented, and they are written so they can
+fail.
 """
 
 from __future__ import annotations

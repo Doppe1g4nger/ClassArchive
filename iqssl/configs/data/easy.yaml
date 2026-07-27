@@ -1,0 +1,4 @@
+root: data/easy
+split_variant: iid
+primary_label: emitter
+crop_len: null

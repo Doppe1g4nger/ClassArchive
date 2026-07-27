@@ -14,34 +14,41 @@ from __future__ import annotations
 import importlib
 import pkgutil
 from collections.abc import Callable
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 
 
 class Registry(Generic[T]):
-    """Maps a short string key to a class."""
+    """Maps a short string key to a class *or* a function.
+
+    Both, deliberately: ``METHODS``, ``ENCODERS`` and ``MODULATORS`` hold classes,
+    while ``AUG_OPS`` holds plain functions. The entry type is therefore the type
+    parameter itself rather than ``type[T]`` -- annotating it as classes-only
+    would have made every augmentation op a type error for no benefit, since
+    ``__name__`` and calling work identically for both.
+    """
 
     def __init__(self, name: str) -> None:
         self.name = name
-        self._entries: dict[str, type[T]] = {}
+        self._entries: dict[str, T] = {}
 
-    def register(self, key: str | None = None) -> Callable[[type[T]], type[T]]:
-        """Decorator. Defaults to the lower-cased class name when ``key`` is omitted."""
+    def register(self, key: str | None = None) -> Callable[[T], T]:
+        """Decorator. Defaults to the lower-cased entry name when ``key`` is omitted."""
 
-        def deco(cls: type[T]) -> type[T]:
-            k = key if key is not None else cls.__name__.lower()
-            if k in self._entries and self._entries[k] is not cls:
+        def deco(entry: T) -> T:
+            k = key if key is not None else entry.__name__.lower()  # type: ignore[attr-defined]
+            if k in self._entries and self._entries[k] is not entry:
                 raise ValueError(
                     f"{self.name} registry: duplicate key {k!r} "
-                    f"(already bound to {self._entries[k].__qualname__})"
+                    f"(already bound to {self._entries[k].__qualname__})"  # type: ignore[attr-defined]
                 )
-            self._entries[k] = cls
-            return cls
+            self._entries[k] = entry
+            return entry
 
         return deco
 
-    def get(self, key: str) -> type[T]:
+    def get(self, key: str) -> T:
         try:
             return self._entries[key]
         except KeyError:
@@ -49,8 +56,8 @@ class Registry(Generic[T]):
                 f"unknown {self.name} {key!r}; available: {sorted(self._entries)}"
             ) from None
 
-    def build(self, key: str, /, **kwargs: object) -> T:
-        return self.get(key)(**kwargs)  # type: ignore[call-arg]
+    def build(self, key: str, /, **kwargs: object) -> Any:
+        return self.get(key)(**kwargs)  # type: ignore[operator]
 
     def keys(self) -> list[str]:
         return sorted(self._entries)

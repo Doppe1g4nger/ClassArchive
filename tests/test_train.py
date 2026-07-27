@@ -1,0 +1,298 @@
+"""Stage-3 tests: the shared loop, schedules, and optimizers.
+
+The properties worth testing here are the ones that make the *comparison* valid
+rather than the ones that make a single run work. A loop that trains fine but
+gives one method an extra warmup step, or that lets an augmentation stream
+perturb weight init, produces a results table that looks completely normal and
+means nothing.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import torch
+from torch import nn
+
+from iqssl.data.build import build_dataset
+from iqssl.data.dataset import IQDataset
+from iqssl.data.params import GeneratorConfig
+from iqssl.registry import ENCODERS, METHODS, autodiscover
+from iqssl.train.loop import TrainConfig, build_loader, train
+from iqssl.train.optim import LARS, build_optimizer
+from iqssl.train.schedules import apply_lr, cosine_with_warmup, scale_base_lr
+from iqssl.utils.seed import seed_everything
+from tests import tolerances as tol
+
+autodiscover()
+
+
+@pytest.fixture(scope="module")
+def dataset(tmp_path_factory) -> IQDataset:
+    root = tmp_path_factory.mktemp("train_ds")
+    build_dataset(
+        GeneratorConfig(n_samples=512, shard_size=512, difficulty="smoke", seed=0),
+        root,
+        overwrite=True,
+        progress=False,
+    )
+    return IQDataset(root, "train")
+
+
+def _method(name: str, dataset: IQDataset, seed: int = 0):
+    """Build a method the way the CLI does: seed, then encoder, then method.
+
+    Constructing the encoder before seeding is exactly the bug
+    ``test_same_seed_reproduces_the_loss_trace`` caught, so the helper mirrors
+    production order rather than a convenient one.
+    """
+    seed_everything(seed)
+    encoder = ENCODERS.get("vit1d")(size="tiny", seq_len=dataset.crop_len, patch_size=16)
+    return METHODS.get(name)(encoder)
+
+
+def _cfg(**kw) -> TrainConfig:
+    base = dict(epochs=1, batch_size=8, max_steps=4, device="cpu", log_every=1, num_workers=0)
+    return TrainConfig(**{**base, **kw})
+
+
+class TestSchedule:
+    def test_warmup_rises_then_cosine_falls(self):
+        total = 100
+        vals = [cosine_with_warmup(s, total, 0.1) for s in range(total)]
+        assert vals[0] < vals[5] <= vals[9]
+        assert vals[9] == pytest.approx(1.0)
+        assert vals[-1] < 0.01
+
+    def test_first_step_is_not_zero(self):
+        # A zero first step wastes it, and with short smoke runs that is a
+        # measurable fraction of the budget.
+        assert cosine_with_warmup(0, 100, 0.1) > 0
+
+    def test_single_step_run_does_not_divide_by_zero(self):
+        assert cosine_with_warmup(0, 1, 0.1) == 1.0
+
+    def test_linear_scaling_rule(self):
+        assert scale_base_lr(0.3, 256) == pytest.approx(0.3)
+        assert scale_base_lr(0.3, 512) == pytest.approx(0.6)
+
+    def test_lr_scale_multiplies_peak(self):
+        p = torch.nn.Parameter(torch.zeros(2))
+        opt = torch.optim.SGD([{"params": [p], "lr": 0.1, "lr_scale": 10.0}], lr=0.1)
+        apply_lr(opt, 10, 100)
+        assert opt.param_groups[0]["lr"] == pytest.approx(1.0)
+
+    def test_fix_lr_groups_never_decay(self):
+        """SimSiam's predictor depends on this; decaying it collapses the model."""
+        p = torch.nn.Parameter(torch.zeros(2))
+        opt = torch.optim.SGD([{"params": [p], "lr": 0.05, "fix_lr": True}], lr=0.05)
+        seen = []
+        for step in (0, 50, 99):
+            apply_lr(opt, step, 100)
+            seen.append(opt.param_groups[0]["lr"])
+        assert all(v == pytest.approx(0.05) for v in seen)
+
+
+class TestOptimizers:
+    @pytest.mark.parametrize("name", ["lars", "sgd", "adamw"])
+    def test_builds_and_steps(self, name):
+        model = nn.Linear(4, 4)
+        opt = build_optimizer(
+            [{"params": list(model.parameters()), "lr": 0.1, "weight_decay": 0.0}], name, lr=0.1
+        )
+        before = model.weight.detach().clone()
+        model(torch.randn(8, 4)).sum().backward()
+        opt.step()
+        assert not torch.equal(before, model.weight)
+
+    def test_unknown_optimizer_rejected(self):
+        with pytest.raises(ValueError, match="unknown optimizer"):
+            build_optimizer([], "adam")
+
+    def test_lars_excluded_groups_match_plain_sgd(self):
+        """`lars_exclude` must genuinely bypass the trust ratio.
+
+        1-D parameters (biases, norm gains) have no meaningful weight norm, and
+        adapting their step by one measurably hurts.
+        """
+        torch.manual_seed(0)
+        p_a = torch.nn.Parameter(torch.randn(4))
+        p_b = torch.nn.Parameter(p_a.detach().clone())
+
+        lars = LARS([{"params": [p_a], "lr": 0.1, "lars_exclude": True}], lr=0.1, momentum=0.0)
+        sgd = torch.optim.SGD([p_b], lr=0.1, momentum=0.0)
+        grad = torch.randn(4)
+        p_a.grad, p_b.grad = grad.clone(), grad.clone()
+        lars.step()
+        sgd.step()
+        assert torch.allclose(p_a, p_b, atol=1e-6)
+
+    def test_lars_adapts_included_groups(self):
+        torch.manual_seed(0)
+        p_a = torch.nn.Parameter(torch.randn(4, 4))
+        p_b = torch.nn.Parameter(p_a.detach().clone())
+        lars = LARS([{"params": [p_a], "lr": 0.1, "lars_exclude": False}], lr=0.1, momentum=0.0)
+        sgd = torch.optim.SGD([p_b], lr=0.1, momentum=0.0)
+        grad = torch.randn(4, 4)
+        p_a.grad, p_b.grad = grad.clone(), grad.clone()
+        lars.step()
+        sgd.step()
+        assert not torch.allclose(p_a, p_b, atol=1e-6)
+
+
+class TestLoader:
+    def test_collate_follows_the_view_spec(self, dataset):
+        loader = build_loader(dataset, METHODS.get("simclr"), _cfg())
+        batch = next(iter(loader))
+        assert batch.x_raw.shape == (8, 2, dataset.crop_len)
+        assert batch.y_primary is not None
+
+    def test_label_needing_methods_get_a_balanced_sampler(self, dataset):
+        """Switched on by ``needs_labels``, never by method name.
+
+        SupCon is why: with many classes and a modest batch, a uniform sampler
+        leaves most anchors with no positive at all and the loss quietly
+        degenerates toward NT-Xent without erroring.
+        """
+        assert build_loader(dataset, METHODS.get("supcon"), _cfg()).sampler is not None
+        plain = build_loader(dataset, METHODS.get("simclr"), _cfg())
+        assert not isinstance(plain.sampler, torch.utils.data.WeightedRandomSampler)
+
+
+class TestLoop:
+    @pytest.mark.parametrize("name", sorted(METHODS.keys()))
+    def test_every_method_trains_end_to_end(self, name, dataset):
+        """One loop, every objective, no branching.
+
+        Parametrized over the registry rather than a hand-written list, so a new
+        method is covered the moment it is registered.
+        """
+        state = train(_method(name, dataset), dataset, _cfg())
+        assert state.step == 4
+        assert np.isfinite(state.final_loss)
+
+    def test_views_are_built_for_the_method(self, dataset):
+        state = train(_method("simclr", dataset), dataset, _cfg(augment="standard"))
+        assert np.isfinite(state.final_loss)
+
+    def test_same_seed_reproduces_the_loss_trace(self, dataset):
+        """Bit-identical, not merely close.
+
+        Any drift means unseeded state leaked into the step, and the seed-to-seed
+        error bars the thesis reports would then include a component that has
+        nothing to do with the seed.
+        """
+        a = train(_method("simclr", dataset), dataset, _cfg(seed=3))
+        b = train(_method("simclr", dataset), dataset, _cfg(seed=3))
+        assert a.final_loss == pytest.approx(b.final_loss, abs=tol.LOSS_TRACE_EXACT)
+
+    def test_different_seeds_diverge(self, dataset):
+        a = train(_method("simclr", dataset, seed=0), dataset, _cfg(seed=0))
+        b = train(_method("simclr", dataset, seed=1), dataset, _cfg(seed=1))
+        assert a.final_loss != b.final_loss
+
+    def test_augmentation_does_not_perturb_weight_init(self, dataset):
+        """Changing the policy must not change the initial weights.
+
+        Otherwise a policy ablation confounds two variables at once, and the
+        difference attributed to augmentation is partly a different model. The
+        augmentation pipeline draws from its own generator for exactly this
+        reason.
+        """
+
+        def first_weight(policy: str):
+            m = _method("simclr", dataset, seed=0)
+            before = next(m.encoder.parameters()).detach().clone()
+            train(m, dataset, _cfg(augment=policy, max_steps=1))
+            return before
+
+        assert torch.equal(first_weight("standard"), first_weight("hardware_invariant"))
+
+    def test_every_method_starts_from_the_same_encoder(self, dataset):
+        """The control variable, enforced.
+
+        "Encoder architecture and init seed held constant" means every method at
+        a given seed starts from the *same weights*, not merely the same shape.
+        If they differed, part of every method-to-method gap would be a different
+        initialization.
+        """
+        ref = None
+        for name in sorted(METHODS.keys()):
+            w = next(_method(name, dataset, seed=0).encoder.parameters()).detach().clone()
+            if ref is None:
+                ref = w
+            else:
+                assert torch.equal(ref, w), name
+
+    def test_compute_accounting_matches_the_run(self, dataset):
+        state = train(_method("simclr", dataset), dataset, _cfg(batch_size=8, max_steps=4))
+        assert state.compute["compute/optimizer_steps"] == 4
+        assert state.compute["compute/samples_seen"] == 32
+        # SimCLR runs the encoder once per view, so two forwards per step.
+        assert state.compute["compute/encoder_forwards"] == 8
+
+    def test_ema_momentum_is_logged_and_ramps(self, dataset):
+        state = train(_method("byol", dataset), dataset, _cfg(max_steps=4, log_every=1))
+        moms = [row["ema_momentum"] for row in state.history if "ema_momentum" in row]
+        assert moms and all(0.99 <= m <= 1.0 for m in moms)
+
+    def test_writes_a_complete_run_directory(self, dataset, tmp_path):
+        out = tmp_path / "run"
+        train(_method("simclr", dataset), dataset, _cfg(), out_dir=out)
+        for name in ("metrics.csv", "config.json", "run_meta.json", "summary.json"):
+            assert (out / name).exists(), name
+        assert (out / "checkpoint.pt").exists()
+
+    def test_online_probe_logs_accuracy(self, dataset):
+        state = train(_method("simclr", dataset), dataset, _cfg(probe_every=1, log_every=1))
+        assert any("probe_acc" in row for row in state.history)
+
+    def test_collapse_canaries_are_always_logged(self, dataset):
+        """Every method, every run.
+
+        Collapse is the characteristic failure of the negative-free objectives and
+        it is silent -- the loss falls beautifully while the encoder maps
+        everything to a point.
+        """
+        for name in sorted(METHODS.keys()):
+            state = train(_method(name, dataset), dataset, _cfg(max_steps=2, log_every=1))
+            keys = set().union(*(row.keys() for row in state.history))
+            assert any(k.endswith("rankme") for k in keys), name
+            assert any(k.endswith("std_min") for k in keys), name
+
+
+class TestFairnessContract:
+    def test_method_configs_may_only_tune_permitted_keys(self):
+        """The contract is enforced, not merely documented.
+
+        A method config that quietly asked for 200 epochs would invalidate the
+        whole results table, and nothing else in the pipeline would notice.
+        """
+        from omegaconf import OmegaConf
+
+        from iqssl.cli.pretrain import merge_train_config
+
+        cfg = OmegaConf.create(
+            {
+                "train": {"epochs": 10, "batch_size": 64},
+                "method": {"name": "cheater", "train": {"epochs": 200}},
+            }
+        )
+        with pytest.raises(ValueError, match="fairness contract"):
+            merge_train_config(cfg)
+
+    def test_permitted_overrides_are_applied(self):
+        from omegaconf import OmegaConf
+
+        from iqssl.cli.pretrain import merge_train_config
+
+        cfg = OmegaConf.create(
+            {
+                "train": {"epochs": 10, "optimizer": "adamw", "base_lr": 1e-3},
+                "method": {"name": "simclr", "train": {"optimizer": "lars", "base_lr": 0.3}},
+            }
+        )
+        merged = merge_train_config(cfg)
+        assert merged.optimizer == "lars"
+        assert merged.base_lr == 0.3
+        assert merged.epochs == 10  # the experiment still governs this

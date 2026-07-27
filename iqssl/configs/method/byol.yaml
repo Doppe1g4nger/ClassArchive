@@ -1,0 +1,12 @@
+name: byol
+args:
+  proj_hidden: 4096
+  proj_dim: 256
+  pred_hidden: 4096
+  momentum_start: 0.996
+  momentum_end: 1.0
+  pool: cls
+train:
+  optimizer: lars
+  base_lr: 0.2
+  weight_decay: 1.5e-6

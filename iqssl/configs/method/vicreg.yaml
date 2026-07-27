@@ -1,0 +1,12 @@
+name: vicreg
+args:
+  sim_coeff: 25.0
+  std_coeff: 25.0
+  cov_coeff: 1.0
+  proj_hidden: 8192
+  proj_dim: 8192
+  pool: mean
+train:
+  optimizer: lars
+  base_lr: 0.2
+  weight_decay: 1.0e-6

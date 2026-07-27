@@ -32,9 +32,10 @@ sweep = ["hydra-optuna-sweeper>=1.2", "hydra-submitit-launcher>=1.2"]
 [project.scripts]
 iqssl-build-dataset = "iqssl.cli.build_dataset:main"
 iqssl-difficulty-report = "iqssl.cli.difficulty_report:main"
-# iqssl-pretrain / iqssl-evaluate / iqssl-aggregate are registered only once
-# their modules exist -- an installed console script that fails on import is
-# worse than an absent one.
+iqssl-pretrain = "iqssl.cli.pretrain:main"
+# iqssl-evaluate / iqssl-aggregate are registered only once their modules exist
+# -- an installed console script that fails on import is worse than an absent
+# one.
 
 [build-system]
 requires = ["hatchling"]

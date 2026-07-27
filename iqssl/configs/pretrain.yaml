@@ -1,0 +1,36 @@
+# Root config for iqssl-pretrain. Compose over it with, e.g.
+#   iqssl-pretrain experiment=smoke_cpu method=simclr
+defaults:
+  - _self_
+  - encoder: vit1d_tiny
+  - method: simclr
+  - data: smoke
+  - experiment: smoke_cpu
+
+experiment: smoke_cpu
+output_root: outputs
+
+train:
+  epochs: 5
+  batch_size: 64
+  base_lr: 1.0e-3
+  weight_decay: 1.0e-6
+  optimizer: adamw
+  warmup_frac: 0.1
+  grad_clip: 1.0
+  seed: 0
+  num_workers: 0
+  device: cpu
+  augment: standard
+  log_every: 20
+  probe_every: 0
+  max_steps: null
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false

@@ -1,0 +1,5 @@
+# ResNet1D has no patch tokens, so the masked and latent-prediction methods
+# reject it at construction rather than silently faking token dropping.
+name: cnn1d
+args:
+  size: r18

@@ -151,6 +151,14 @@ class SmallCNN(nn.Module):
     Its job is to answer "is this task learnable at all?", so it must not be so
     strong that it flatters a broken dataset, nor so weak that its failure is
     about the model. Four strided conv blocks and a linear head.
+
+    Pooling concatenates the mean *and* the standard deviation over time, which
+    is not decoration. With mean pooling alone the oracle reached 0.77 on the
+    `easy` preset while the closed-form classical baseline -- which is allowed
+    kurtosis, PAPR and envelope variance -- did well on exactly the features the
+    oracle structurally could not compute: an average cannot represent a second
+    moment. A ceiling that cannot express the statistics its own floor uses is
+    measuring the architecture rather than the task.
     """
 
     def __init__(self, n_classes: int, in_ch: int = 2, width: int = 32) -> None:
@@ -164,11 +172,12 @@ class SmallCNN(nn.Module):
                 nn.ReLU(inplace=True),
             ]
         self.features = nn.Sequential(*blocks)
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(chans[-1], n_classes)
+        self.fc = nn.Linear(chans[-1] * 2, n_classes)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.fc(self.pool(self.features(x)).flatten(1))
+        h = self.features(x)
+        stats = torch.cat([h.mean(-1), h.std(-1)], dim=-1)
+        return self.fc(stats)
 
 
 # --- the three baselines ------------------------------------------------------

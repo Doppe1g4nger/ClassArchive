@@ -1,0 +1,13 @@
+name: simclr
+args:
+  temperature: 0.1
+  proj_hidden: 2048
+  proj_dim: 128
+  pool: cls
+# LARS at large batch is the published recipe; the fairness contract lets the
+# optimizer family vary because forcing one would handicap several methods
+# against their own literature.
+train:
+  optimizer: lars
+  base_lr: 0.3
+  weight_decay: 1.0e-6

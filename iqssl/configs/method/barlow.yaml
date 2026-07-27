@@ -1,0 +1,13 @@
+name: barlow
+args:
+  lambd: 5.0e-3
+  proj_hidden: 8192
+  proj_dim: 8192
+  pool: mean
+# The wide projector is not a fairness violation to be equalized away: Barlow
+# Twins genuinely needs one, and capping it at SimCLR's 128 would be a handicap
+# dressed up as fairness. The encoder is the control variable, not the heads.
+train:
+  optimizer: lars
+  base_lr: 0.2
+  weight_decay: 1.5e-6

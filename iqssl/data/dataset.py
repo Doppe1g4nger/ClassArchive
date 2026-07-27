@@ -135,6 +135,15 @@ class IQDataset(Dataset):
     def num_primary_classes(self) -> int:
         return self.n_emitters if self.primary_label == "emitter" else len(self._mods)
 
+    def primary_labels(self) -> np.ndarray:
+        """All primary labels for this split, ``(N,)`` int64.
+
+        Exposed so the training loop can build a class-balanced sampler without
+        materializing every item first -- at 200k buffers that would mean reading
+        the whole array off disk before the first step.
+        """
+        return self._y_emitter if self.primary_label == "emitter" else self._y_mod
+
     def _read(self, i: int) -> np.ndarray:
         s = int(self._shard_of[i])
         if s not in self._shards:

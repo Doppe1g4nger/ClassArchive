@@ -1,0 +1,11 @@
+# @package _global_
+# Minutes on a laptop CPU. Exists so the whole path -- data, augment, loop,
+# checkpointing -- is exercised in CI rather than only at full scale.
+experiment: smoke_cpu
+train:
+  epochs: 1
+  batch_size: 32
+  max_steps: 20
+  device: cpu
+  log_every: 5
+  probe_every: 10

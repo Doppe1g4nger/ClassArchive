@@ -1,0 +1,14 @@
+# @package _global_
+# The thesis run. Everything here is part of the fairness contract and is held
+# identical across methods; only the objective and its tuned lr/wd differ.
+experiment: main_comparison
+train:
+  epochs: 100
+  batch_size: 256
+  warmup_frac: 0.1
+  grad_clip: 1.0
+  device: cuda
+  log_every: 50
+  probe_every: 100
+data:
+  root: data/synth_v1

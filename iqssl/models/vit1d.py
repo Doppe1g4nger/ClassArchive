@@ -103,7 +103,6 @@ class Block(nn.Module):
         return x + self.drop_path(self.mlp(self.norm2(x)))
 
 
-@ENCODERS.register("vit1d")
 class ViT1D(nn.Module):
     """1D ViT over IQ patches.
 
@@ -245,8 +244,15 @@ VIT_SIZES: dict[str, dict[str, int | float]] = {
 }
 
 
+@ENCODERS.register("vit1d")
 def vit1d(size: str = "small", **kwargs) -> ViT1D:
-    """Named size shortcut. ``tiny`` is the CPU smoke-test configuration."""
+    """Named size shortcut. ``tiny`` is the CPU smoke-test configuration.
+
+    The *factory* carries the registry entry, not the class: config-driven
+    construction addresses encoders by size name, and registering the class would
+    force every config to spell out embed_dim/depth/num_heads and let two
+    experiments drift apart on a dimension the fairness contract holds fixed.
+    """
     if size not in VIT_SIZES:
         raise ValueError(f"unknown ViT size {size!r}; options: {sorted(VIT_SIZES)}")
     return ViT1D(**{**VIT_SIZES[size], **kwargs})  # type: ignore[arg-type]
