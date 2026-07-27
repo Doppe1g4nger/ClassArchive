@@ -169,9 +169,11 @@ def _advice(
         if train_acc > 0.95:
             return (
                 base + f"The oracle memorized the training set (train {train_acc:.3f} vs "
-                f"test {value:.3f}), so this is DATA-limited, not signal-limited: "
-                "generate more samples (--n-samples) before touching any prior. "
-                "Strengthening impairments here would make the task easier, not harder."
+                f"test {value:.3f}), so this is DATA-limited, not signal-limited. "
+                "Raise --n-train (and --n-samples, if the train split cannot supply "
+                "it) before touching any prior: on `easy`, 12k training buffers gave "
+                "0.785 and 48k gave 0.891. Strengthening impairments here would make "
+                "the task easier, not harder."
             )
         return (
             base + f"Train accuracy is only {train_acc:.3f}, so the oracle is underfitting "

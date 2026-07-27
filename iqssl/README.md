@@ -80,7 +80,7 @@ untested at the end.
 | --- | --- | --- |
 | 0. Scaffold, registry, contracts, CI | **done** | lint + types + tests green |
 | 1. `dsp/` signal primitives | **done** | 113 property tests; BER=0 clean path, every digital modulation |
-| 2. `data/` + difficulty gate | **done** | `easy` preset **PASSES**: classical 0.183, raw-IQ 0.061, oracle 0.887 @ high SNR |
+| 2. `data/` + difficulty gate | **done** | `easy` **PASSES** at 48k train buffers: classical 0.195, raw-IQ 0.062, oracle 0.891 @ high SNR |
 | 3. Encoders, heads, EMA, `Method` contract | **partial** | ViT1D/ResNet1D/EMA/heads done + tested; **training loop not yet written** |
 | 4. `augment/` ops and five policies | **done** | ops, `none`/`light`/`standard`/`heavy`/`hardware_invariant`, masking, pipeline |
 | 5. View methods | **done** | SimCLR, SupCon, Barlow Twins, VICReg, BYOL, SimSiam |
@@ -118,42 +118,49 @@ whether any `iqssl/**/*.py` is ignored. Do not un-anchor them.
 
 ### Calibration state
 
-**The gate does not currently pass on `easy`.** Measured after the `data/`
-rewrite, at 24k generated samples and the gate's default 12k training buffers:
+**The gate PASSES on `easy`**, and the rewritten generator reproduces the
+calibration recorded before the package was lost:
 
-| check | measured | band | previously recorded |
+```bash
+iqssl-build-dataset --out data/easy --difficulty easy --n-samples 120000
+iqssl-difficulty-report --data data/easy --n-train 48000 --n-test 6000
+```
+
+| check | measured | recorded | band |
 | --- | --- | --- | --- |
-| classical | 0.201 | < 0.60 — **pass** | 0.183 |
-| raw-IQ linear | 0.060 | < 0.25 — **pass** | 0.061 |
-| oracle @ high SNR | 0.785 | 0.85–0.95 — **fail** | 0.887 |
+| classical | 0.195 | 0.183 | < 0.60 — **pass** |
+| raw-IQ linear | 0.062 | 0.061 | < 0.25 — **pass** |
+| oracle @ high SNR | **0.891** | **0.887** | 0.85–0.95 — **pass** |
 
-Two of the three reproduce the earlier numbers closely; raw-IQ sits at chance
-for 16 emitters, which is the healthy result.
+All three land within about 0.01 of the earlier numbers, and raw-IQ sits at
+chance for 16 emitters, which is the healthy result. That agreement is the main
+evidence that the rewrite is faithful rather than merely self-consistent.
 
-**The oracle shortfall is data-limited, and that was not obvious.** Train
-accuracy is **1.000** against a test score of 0.785 — the oracle memorizes 12k
-buffers outright. Both plausible fixes for a low ceiling therefore point the
-wrong way: strengthening the impairments would make the task *easier*, and
-lengthening the buffer addresses a signal weakness that is not the constraint.
-The answer is simply more samples. The gate now reports train accuracy and
-branches its advice on it, so this diagnosis is automatic rather than
-re-derived.
+**Sample count is the binding constraint, and diagnosing that took a
+detour worth recording.** At the gate's default 12k training buffers the oracle
+reached only 0.785, and *both* obvious fixes point the wrong way: train accuracy
+was 1.000, so the oracle was memorizing, which means strengthening the
+impairments would have made the task easier and lengthening the buffer would
+have treated a signal weakness that was not the constraint. 48k training buffers
+took it to 0.891 with no other change. The gate now reports train accuracy and
+branches its advice on it, so the diagnosis is automatic.
 
-Two things were tried before that diagnosis existed, and both are recorded
-because their outcomes are informative:
+Two changes were made before that diagnostic existed:
 
-- The emitter prior was widened once (oracle 0.632 → 0.771). It was justified at
-  the time by the large headroom under the classical ceiling, but it treated a
-  data problem as a signal problem. Now that classical sits at 0.201 against a
-  recorded 0.183, the prior may be slightly *too* strong; re-narrow it if the
-  oracle overshoots 0.95 once the sample count is adequate.
-- `SmallCNN` gained std-pooling alongside mean-pooling (0.771 → 0.785). Kept on
-  its own merits — a ceiling should be able to express the second-order
-  statistics its classical floor uses — but it did not close the gap.
+- The emitter prior was widened once (0.632 → 0.771 at 12k). It was reasoning
+  from the wrong model of the failure, but the final numbers vindicate the
+  setting — classical 0.195 against a recorded 0.183 and the oracle within 0.004
+  of its recorded value. Strictly, this leaves one thing unmeasured: whether the
+  *narrow* prior would also pass at 48k. The 12k trend (0.632 narrow vs 0.771
+  wide) suggests not, but that is an inference, not a measurement.
+- `SmallCNN` pools mean **and** standard deviation rather than mean alone
+  (0.771 → 0.785 at 12k). Kept because a ceiling should be able to express the
+  second-order statistics its own classical floor uses, not because it closed
+  the gap — it did not.
 
-`medium` and `hard` have **not** been verified against the gate at all. Do that
-before trusting any result from them, and expect them to need more data still,
-since both are strictly harder than `easy`:
+`medium` and `hard` have **not** been verified against the gate. Do that before
+trusting any result from them, and start from 48k training buffers, since both
+are strictly harder than `easy`:
 
 ```bash
 iqssl-build-dataset --out data/synth_v1 --difficulty medium --n-samples 200000
