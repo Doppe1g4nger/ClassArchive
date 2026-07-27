@@ -192,6 +192,8 @@ def apply_emitter_chain(
     pn_linewidth_hz: Tensor | float = 0.0,
     sample_rate_hz: float = 1e6,
     generator: torch.Generator | None = None,
+    pn_unit_steps: Tensor | None = None,
+    pn_initial_phase: Tensor | None = None,
 ) -> Tensor:
     """The transmitter chain in its canonical order.
 
@@ -199,10 +201,23 @@ def apply_emitter_chain(
     documented rather than left to the caller: imbalance and DC are baseband
     effects that precede upconversion, and the PA sits last in the real signal
     path, so its compression must see the already-impaired envelope.
+
+    ``pn_unit_steps``/``pn_initial_phase`` forward externally-drawn randomness to
+    :func:`phase_noise`. The dataset generator supplies them so a sample's signal
+    depends only on its own RNG stream: drawing from a shared ``generator`` here
+    would make the result depend on how many samples happened to be processed
+    together, and the dataset hash would stop being reproducible.
     """
     y = iq_imbalance(x, iq_gain_db, iq_phase_deg)
     y = dc_offset(y, dc_i_dbc, dc_q_dbc, dbc=True)
-    y = phase_noise(y, pn_linewidth_hz, sample_rate_hz, generator=generator)
+    y = phase_noise(
+        y,
+        pn_linewidth_hz,
+        sample_rate_hz,
+        generator=generator,
+        unit_steps=pn_unit_steps,
+        initial_phase=pn_initial_phase,
+    )
     return saleh(
         y,
         alpha_a=pa_alpha_a,
