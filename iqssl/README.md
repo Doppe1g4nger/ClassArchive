@@ -118,20 +118,54 @@ whether any `iqssl/**/*.py` is ignored. Do not un-anchor them.
 
 ### Calibration state
 
-The difficulty gate passes on `easy`. `medium` and `hard` were recalibrated
-from a measured ladder but have **not** been re-verified against the gate at
-full scale — do that before trusting any result from them:
+**The gate does not currently pass on `easy`.** Measured after the `data/`
+rewrite, at 24k generated samples and the gate's default 12k training buffers:
+
+| check | measured | band | previously recorded |
+| --- | --- | --- | --- |
+| classical | 0.201 | < 0.60 — **pass** | 0.183 |
+| raw-IQ linear | 0.060 | < 0.25 — **pass** | 0.061 |
+| oracle @ high SNR | 0.785 | 0.85–0.95 — **fail** | 0.887 |
+
+Two of the three reproduce the earlier numbers closely; raw-IQ sits at chance
+for 16 emitters, which is the healthy result.
+
+**The oracle shortfall is data-limited, and that was not obvious.** Train
+accuracy is **1.000** against a test score of 0.785 — the oracle memorizes 12k
+buffers outright. Both plausible fixes for a low ceiling therefore point the
+wrong way: strengthening the impairments would make the task *easier*, and
+lengthening the buffer addresses a signal weakness that is not the constraint.
+The answer is simply more samples. The gate now reports train accuracy and
+branches its advice on it, so this diagnosis is automatic rather than
+re-derived.
+
+Two things were tried before that diagnosis existed, and both are recorded
+because their outcomes are informative:
+
+- The emitter prior was widened once (oracle 0.632 → 0.771). It was justified at
+  the time by the large headroom under the classical ceiling, but it treated a
+  data problem as a signal problem. Now that classical sits at 0.201 against a
+  recorded 0.183, the prior may be slightly *too* strong; re-narrow it if the
+  oracle overshoots 0.95 once the sample count is adequate.
+- `SmallCNN` gained std-pooling alongside mean-pooling (0.771 → 0.785). Kept on
+  its own merits — a ceiling should be able to express the second-order
+  statistics its classical floor uses — but it did not close the gap.
+
+`medium` and `hard` have **not** been verified against the gate at all. Do that
+before trusting any result from them, and expect them to need more data still,
+since both are strictly harder than `easy`:
 
 ```bash
 iqssl-build-dataset --out data/synth_v1 --difficulty medium --n-samples 200000
-iqssl-difficulty-report --data data/synth_v1
+iqssl-difficulty-report --data data/synth_v1 --n-train 48000
 ```
 
-If `medium` lands outside its bands, the ladder measurements say which knob to
-reach for: multipath is the dominant destroyer of the fingerprint (going from 1
-to 2 taps roughly halves oracle accuracy), low SNR is second, and CFO costs
-very little. Widening the emitter impairment spreads is the *last* resort, not
-the first — it is also the fastest way to make the task trivial.
+If a preset lands outside its bands, read the train accuracy first. When the
+oracle is genuinely underfitting rather than memorizing, the ladder says which
+knob to reach for: multipath is the dominant destroyer of the fingerprint (1 to
+2 taps roughly halves oracle accuracy), low SNR is second, and CFO costs very
+little. Widening the emitter spreads is the *last* resort — it is the fastest
+way to make the task trivial.
 
 ## Quickstart
 
