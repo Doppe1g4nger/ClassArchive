@@ -63,7 +63,7 @@ CLASSICAL_FEATURE_NAMES = [
     "kurtosis",
     "c40_mag",
     "cfo_est",
-    "evm_proxy",
+    "dphi_var",
     "spectral_flatness",
     "envelope_var",
 ]
@@ -89,8 +89,16 @@ def classical_features(x: Tensor) -> Tensor:
     # imbalance but measured something else and scored F=0.3 against emitter id.
     # A proper (circular) complex signal has E[z^2] = 0; imbalance makes it
     # improper, and this ratio tracks |nu| directly. Critically it survives an
-    # unknown carrier phase: rotating z by e^{j@} scales E[z^2] by e^{2j@} and
+    # unknown carrier *phase*: rotating z by e^{j@} scales E[z^2] by e^{2j@} and
     # leaves the magnitude alone. After the swap, F rose to 12.5.
+    #
+    # It does *not* survive a carrier frequency offset, which is a separate
+    # matter and worth knowing before trusting this column: an offset f makes the
+    # E[z^2] integrand carry e^{j2(2*pi*f*n)}, which averages toward zero once the
+    # offset spans an appreciable fraction of a cycle across the buffer. On the
+    # presets here that leaves circularity near its null value, and the
+    # fingerprint is instead carried by the envelope columns (papr, kurtosis,
+    # envelope_var) and by dphi_var.
     circularity = (z**2).mean(-1).abs() / power
 
     papr = 10.0 * torch.log10((amp.pow(2).amax(-1) / power).clamp_min(eps))
@@ -101,12 +109,14 @@ def classical_features(x: Tensor) -> Tensor:
     # exactly `circularity` above, and a duplicated column buys nothing.
     c40 = (z**4).mean(-1).abs() / power.pow(2)
 
-    # Coarse CFO estimate: mean phase advance between adjacent samples, in
-    # cycles per sample. Conjugate-product averaging rather than a per-sample
-    # angle mean, so it does not wrap at +/-pi.
+    # Differential phase: mean advance is the CFO estimate, variance about it is
+    # an oscillator-linewidth proxy. The variance term is the only phase-coherent
+    # feature that survives a carrier offset -- `circularity` does not, because
+    # E[z^2] picks up a factor e^{j2(2*pi*f*n)} that averages toward zero over a
+    # buffer once the offset spans more than a fraction of a cycle.
+    dphi = torch.angle(z[:, 1:] * z[:, :-1].conj())
     cfo = torch.angle((z[:, 1:] * z[:, :-1].conj()).mean(-1)) / (2 * torch.pi)
-
-    evm = (amp - amp.mean(-1, keepdim=True)).pow(2).mean(-1) / power
+    dphi_var = dphi.var(-1)
 
     spec = torch.fft.fft(z, dim=-1).abs().pow(2).clamp_min(eps)
     flat = torch.exp(torch.log(spec).mean(-1)) / spec.mean(-1)
@@ -123,7 +133,7 @@ def classical_features(x: Tensor) -> Tensor:
             kurt,
             c40,
             cfo,
-            evm,
+            dphi_var,
             flat,
             env_var,
         ],

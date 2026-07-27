@@ -82,10 +82,10 @@ class EmitterPrior:
     a fingerprinting model has to recover.
     """
 
-    iq_gain_db: tuple[float, float] = (-1.2, 1.2)
-    iq_phase_deg: tuple[float, float] = (-9.0, 9.0)
+    iq_gain_db: tuple[float, float] = (-2.5, 2.5)
+    iq_phase_deg: tuple[float, float] = (-15.0, 15.0)
 
-    dc_dbc: tuple[float, float] = (-30.0, -19.0)
+    dc_dbc: tuple[float, float] = (-28.0, -14.0)
     """LO leakage relative to buffer RMS.
 
     The lower bound is a hard physical floor, not a taste. A buffer's own sample
@@ -95,8 +95,18 @@ class EmitterPrior:
     fraction of the emitter label pure noise.
     """
 
-    pa_ibo_db: tuple[float, float] = (3.0, 11.0)
-    """Saleh input back-off. Low back-off means hard compression."""
+    pa_ibo_db: tuple[float, float] = (2.0, 10.0)
+    """Saleh input back-off. Low back-off means hard compression.
+
+    These spreads were widened once, from (+/-1.2 dB, +/-9 deg, -30..-19 dBc,
+    3-11 dB), after the gate measured a supervised oracle at 0.63 against its
+    0.85-0.95 band -- the fingerprint was present at ten times chance but not
+    fully resolvable in 1024 samples. Widening is normally the *last* knob to
+    reach for, because it is the fastest way to make the task trivially easy;
+    it was the right one here only because the classical baseline sat at 0.139
+    against a 0.60 ceiling, leaving room to spend. Check that headroom before
+    touching these again.
+    """
 
     pn_linewidth_hz: tuple[float, float] = (15.0, 120.0)
     """Oscillator linewidth, bounded **above** at 120 Hz.
