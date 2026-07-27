@@ -10,17 +10,25 @@ venv/
 .coverage
 htmlcov/
 
-# Generated datasets and run outputs — regenerate from configs, never commit
-data/
-outputs/
-multirun/
-results/
-!results/frozen/
-wandb/
+# Generated datasets and run outputs — regenerate from configs, never commit.
+#
+# These are anchored with a leading slash, and must stay that way. An unanchored
+# `data/` matches a directory named `data` at *any* depth, which is how the whole
+# of `iqssl/data/` was silently excluded from four commits: the package was never
+# committed, the session that wrote it ended, and the code was gone. Anchoring
+# scopes each rule to the repository root, where the generated artefacts actually
+# live. tests/test_scaffold.py::test_every_package_module_is_tracked fails if a
+# package module ever goes untracked again.
+/data/
+/outputs/
+/multirun/
+/results/
+!/results/frozen/
+/wandb/
 *.pt
 *.ckpt
 *.npy
 *.parquet
-!results/frozen/*.parquet
+!/results/frozen/*.parquet
 
 .DS_Store

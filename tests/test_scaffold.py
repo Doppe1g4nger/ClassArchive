@@ -2,12 +2,64 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 import torch
 
 from iqssl.registry import Registry
 from iqssl.types import Batch, MethodOutput, ViewSpec
 from iqssl.utils import hashing, seed
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_no_package_module_is_gitignored():
+    """No ``iqssl/**/*.py`` may be excluded by `.gitignore`.
+
+    This exists because `.gitignore` once carried an unanchored ``data/`` rule,
+    which matches a directory of that name at *any* depth. All of ``iqssl/data/``
+    was therefore excluded from four consecutive commits without a word of
+    warning: ``git add`` reported nothing, ``git status`` was clean, the local
+    suite was green, and the package simply was not in the repository. It was
+    noticed only after the session that wrote it had ended, by which point the
+    code was unrecoverable.
+
+    No ordinary unit test can catch that, because on the machine that wrote the
+    file the import works perfectly. Only a question about *git's* view of the
+    tree can. The check is "is it ignored?" rather than "is it committed?" —
+    being uncommitted is the normal state of code being written, whereas being
+    ignored is never correct for a package module.
+    """
+    on_disk = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in (REPO_ROOT / "iqssl").rglob("*.py")
+        if "__pycache__" not in p.parts
+    )
+    assert on_disk, "found no package modules at all -- is the test running from the repo?"
+
+    proc = subprocess.run(
+        ["git", "check-ignore", "--stdin"],
+        cwd=REPO_ROOT,
+        input="\n".join(on_disk),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # 0 = something matched, 1 = nothing matched, 128 = not a git tree.
+    if proc.returncode == 128:
+        pytest.skip("not a git working tree")
+
+    ignored = sorted(proc.stdout.split())
+    assert not ignored, (
+        "these package modules are excluded by .gitignore and would be silently "
+        "dropped from every commit:\n  "
+        + "\n  ".join(ignored)
+        + "\n\nRun `git check-ignore -v <path>` for the offending line. The usual "
+        "cause is an unanchored directory pattern -- `data/` matches a directory "
+        "of that name at any depth, `/data/` only at the repository root."
+    )
 
 
 class TestRegistry:
