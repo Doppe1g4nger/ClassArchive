@@ -133,7 +133,7 @@ def _evaluate_bands(results: list[BaselineResult], snr_range: tuple[float, float
                 "band": list(band),
                 "ok": ok,
                 "applicable": True,
-                "advice": _advice(key, value, band),
+                "advice": _advice(key, value, band, by_name["supervised_cnn"].accuracy_train),
             }
         )
     return checks
@@ -143,7 +143,9 @@ def _spans_0db(snr_range: tuple[float, float], margin: float = 3.0) -> bool:
     return snr_range[0] <= margin and snr_range[1] >= -margin
 
 
-def _advice(key: str, value: float, band: tuple[float, float]) -> str:
+def _advice(
+    key: str, value: float, band: tuple[float, float], train_acc: float = float("nan")
+) -> str:
     if np.isnan(value):
         return "not measurable -- is that SNR band populated?"
     if band[0] <= value <= band[1]:
@@ -155,10 +157,28 @@ def _advice(key: str, value: float, band: tuple[float, float]) -> str:
             "(EmitterPrior in iqssl/data/params.py) or widen the channel nuisances."
         )
     if key.startswith("supervised_cnn") and value < band[0]:
-        return (
+        # "The oracle scored too low" has two opposite causes, and the fixes
+        # point in opposite directions, so the advice has to know which it is.
+        # Train accuracy is what separates them.
+        base = (
             "task is too hard: even a supervised oracle cannot learn it, so method "
-            "rankings would be noise. Prefer lengthening the buffer (crop_len 1024 "
-            "-> 4096) over inflating impairments, which just makes it trivial again."
+            "rankings would be noise. "
+        )
+        if np.isnan(train_acc):
+            return base + "Run with train accuracy reported to tell memorization from underfitting."
+        if train_acc > 0.95:
+            return (
+                base + f"The oracle memorized the training set (train {train_acc:.3f} vs "
+                f"test {value:.3f}), so this is DATA-limited, not signal-limited: "
+                "generate more samples (--n-samples) before touching any prior. "
+                "Strengthening impairments here would make the task easier, not harder."
+            )
+        return (
+            base + f"Train accuracy is only {train_acc:.3f}, so the oracle is underfitting "
+            "rather than memorizing and more data will not help. The signal is too "
+            "weak to resolve in this buffer: lengthen it (crop_len 1024 -> 4096), "
+            "which is preferred over inflating impairments because that just makes "
+            "the task trivially easy again."
         )
     if key.startswith("supervised_cnn") and value > band[1]:
         return "ceiling too high: methods will bunch near saturation. Narrow the emitter spreads."
@@ -181,6 +201,8 @@ def _print_report(report: dict) -> None:
         if not np.isnan(r["accuracy_high_snr"]):
             print(f"  {'  @ high SNR':<24} {r['accuracy_high_snr']:>9.3f}")
             print(f"  {'  @ 0 dB':<24} {r['accuracy_0db']:>9.3f}")
+        if not np.isnan(r.get("accuracy_train", float("nan"))):
+            print(f"  {'  on train':<24} {r['accuracy_train']:>9.3f}")
     print()
     print(f"  {'gate check':<28} {'value':>7} {'target band':>14}   result")
     print(f"  {'-' * 28} {'-' * 7} {'-' * 14}   {'-' * 6}")

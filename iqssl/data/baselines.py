@@ -48,6 +48,17 @@ class BaselineResult:
     accuracy: float
     accuracy_high_snr: float = float("nan")
     accuracy_0db: float = float("nan")
+    accuracy_train: float = float("nan")
+    """Training accuracy, reported so a low test score can be diagnosed.
+
+    "The oracle only reached 0.78" has two opposite causes. If train accuracy is
+    near 1.0 the model has memorized and the task is *data*-limited -- generate
+    more. If train accuracy is also ~0.78 it is capacity- or signal-limited, and
+    more data will not help; the buffer needs to be longer or the impairments
+    stronger. Without this number the gate's advice is a guess, and the two fixes
+    point in opposite directions.
+    """
+
     notes: str = ""
     feature_names: list[str] = field(default_factory=list)
 
@@ -283,12 +294,15 @@ def run_supervised_cnn_baseline(
             sched.step()
 
     model.eval()
-    preds = []
-    with torch.no_grad():
-        for s in range(0, len(xte), 512):
-            preds.append(model(xte[s : s + 512].to(dev)).argmax(-1).cpu())
-    pred = torch.cat(preds).numpy()
 
+    def predict(x: Tensor) -> np.ndarray:
+        chunks = []
+        with torch.no_grad():
+            for s in range(0, len(x), 512):
+                chunks.append(model(x[s : s + 512].to(dev)).argmax(-1).cpu())
+        return torch.cat(chunks).numpy()
+
+    pred = predict(xte)
     high = snr_te >= np.percentile(snr_te, HIGH_SNR_PERCENTILE)
     near0 = np.abs(snr_te) <= ZERO_DB_TOLERANCE
     return BaselineResult(
@@ -296,5 +310,6 @@ def run_supervised_cnn_baseline(
         accuracy=_accuracy(pred, yte),
         accuracy_high_snr=_accuracy(pred[high], yte[high]),
         accuracy_0db=_accuracy(pred[near0], yte[near0]) if near0.any() else float("nan"),
+        accuracy_train=_accuracy(predict(xtr), ytr),
         notes=f"SmallCNN, {epochs} epochs, {n_classes} classes",
     )
