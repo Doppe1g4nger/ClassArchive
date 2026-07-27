@@ -9,8 +9,8 @@ reason recorded — not a quiet loosening at the call site.
 from __future__ import annotations
 
 # --- Pulse shaping -----------------------------------------------------------
-RRC_VS_FREQ_DOMAIN = 1e-6
-"""Time-domain RRC taps vs. an independent frequency-domain construction."""
+RRC_SINGULARITY_LIMIT = 1e-6
+"""Analytic singularity limits vs. the generic formula evaluated near the limit."""
 
 RRC_NYQUIST_ISI = 1e-6
 """|RC(kT)| at nonzero symbol lags. Truncation to a finite span sets the floor."""
@@ -64,7 +64,10 @@ RAYLEIGH_KS_P = 0.01
 TAP_POWER_REL = 0.03
 """E|h_l|^2 vs. the profile power p_l, over many realizations."""
 
-RICIAN_K_REL = 0.05
+RICIAN_K_MOMENT_REL = 0.15
+"""Rician K from the fourth-moment ratio. Looser than the tap-power check
+because a fourth moment is a high-variance statistic: the specular component
+carries random phase, so mean-based (lower-variance) estimators read K as zero."""
 
 # --- Modulation --------------------------------------------------------------
 CPM_CONSTANT_MODULUS = 1e-6
