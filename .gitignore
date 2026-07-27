@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated datasets and run outputs — regenerate from configs, never commit
+data/
+outputs/
+multirun/
+results/
+!results/frozen/
+wandb/
+*.pt
+*.ckpt
+*.npy
+*.parquet
+!results/frozen/*.parquet
+
+.DS_Store
