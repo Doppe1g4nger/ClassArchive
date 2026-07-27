@@ -82,23 +82,39 @@ untested at the end.
 | 1. `dsp/` signal primitives | **done** | 113 property tests; BER=0 clean path, every digital modulation |
 | 2. `data/` + difficulty gate | **done** | `easy` preset **PASSES**: classical 0.183, raw-IQ 0.061, oracle 0.887 @ high SNR |
 | 3. Encoders, heads, EMA, `Method` contract | **partial** | ViT1D/ResNet1D/EMA/heads done + tested; **training loop not yet written** |
-| 4. `augment/` ops and five policies | not started | |
-| 5. View methods | **2 of 5** | SimCLR + SupCon done; Barlow/VICReg losses written and tested, methods not wired |
-| 6. Masked / latent methods | not started | MAE decoder written; MAE, I-JEPA, TS-JEPA, data2vec not wired |
+| 4. `augment/` ops and five policies | **done** | ops, `none`/`light`/`standard`/`heavy`/`hardware_invariant`, masking, pipeline |
+| 5. View methods | **done** | SimCLR, SupCon, Barlow Twins, VICReg, BYOL, SimSiam |
+| 6. Masked / latent methods | not started | MAE decoder and mask generators written; MAE, I-JEPA, TS-JEPA, data2vec not wired |
 | 7. Full eval protocol | not started | |
-| 8. Configs + equal-budget HPO | not started | |
+| 8. Configs + equal-budget HPO | **partial** | Hydra tree and per-method configs exist; no HPO sweeper yet |
 | 9. Analysis and aggregation | not started | |
 
-**What runs today:** dataset generation, the difficulty gate, every DSP
-primitive, both encoders, the EMA teacher, all five loss functions, and the
-SimCLR/SupCon method objects (unit-tested against analytic references).
-`iqssl-build-dataset` and `iqssl-difficulty-report` are working CLIs.
+**What runs today:** everything through pretraining. `iqssl-pretrain` trains any
+of the six view methods end to end, on CPU, writing `metrics.csv`, a config
+snapshot, run provenance and a checkpoint. `iqssl-build-dataset` and
+`iqssl-difficulty-report` work as before.
 
-**What does not run yet:** `iqssl-pretrain`, `iqssl-evaluate` and
-`iqssl-aggregate` are declared entry points with no implementation behind them.
-Nothing can actually be trained end to end until `train/loop.py` and
-`augment/` exist — the loop needs the augmentation pipeline to produce the
-views that `ViewSpec` promises.
+**What does not run yet:** `iqssl-evaluate` and `iqssl-aggregate` do not exist,
+so nothing yet measures a *representation* — pretraining logs an online probe as
+a diagnostic, and that is not the evaluation protocol. The four masked and
+latent-prediction methods are not wired, though the pieces they need (patch
+decoder, `random`/`block`/`causal` mask generation, the ViT's three forward
+paths) are built and tested.
+
+### A note on the gitignore incident
+
+`iqssl/data/` was absent from the first four commits on this branch. `.gitignore`
+carried an unanchored `data/`, which git matches against a directory of that name
+at *any* depth, so the whole package — generator, splits, storage, baselines —
+was silently excluded. Nothing complained: `git add` reported no new files,
+`git status` was clean, and the local suite passed because the modules were on
+disk the entire time. It surfaced only in CI, after the session that wrote them
+had ended and the container had been reclaimed, and the code had to be rewritten
+from its surviving tests.
+
+That is why the four directory rules are now anchored (`/data/`, `/outputs/`,
+`/multirun/`, `/results/`) and why `tests/test_scaffold.py` asks git directly
+whether any `iqssl/**/*.py` is ignored. Do not un-anchor them.
 
 ### Calibration state
 
@@ -125,22 +141,23 @@ uv pip install -e ".[dev]"
 # CPU-only host: smaller wheels
 # uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-pytest -m "not slow"                           # core suite (257 tests)
+pytest -m "not slow"                           # core suite
 
 iqssl-build-dataset --out data/smoke --difficulty smoke --n-samples 4096
-iqssl-difficulty-report --data data/smoke      # the gate
+iqssl-difficulty-report --data data/smoke --no-gate   # the gate; see calibration below
+
+iqssl-pretrain experiment=smoke_cpu method=simclr     # ~20 steps on CPU
 
 # Not implemented yet -- see Implementation status above.
-# iqssl-pretrain experiment=smoke_cpu method=simclr
 # iqssl-evaluate run=outputs/smoke_cpu/simclr/seed0/<timestamp>
 # iqssl-aggregate root=outputs/smoke_cpu
 ```
 
-Full sweep (once stages 3-8 land):
+Sweep across methods and seeds (`-m` is Hydra's multirun):
 
 ```bash
 iqssl-pretrain -m experiment=main_comparison \
-  method=simclr,supcon,barlow,vicreg,byol,simsiam,mae,ijepa,tsjepa,data2vec,supervised,random \
+  method=simclr,supcon,barlow,vicreg,byol,simsiam \
   seed=0,1,2
 ```
 

@@ -60,14 +60,21 @@ jobs:
       - name: Build a tiny dataset
         run: uv run iqssl-build-dataset --out data/smoke --difficulty smoke --n-samples 4096
       - name: Difficulty gate report
+        # --no-gate: the smoke preset is 8 emitters in 256-sample buffers with a
+        # 20-epoch oracle, which is far too small to sit in the calibration
+        # bands. The step exists to prove the gate *runs*; `easy` is where the
+        # bands are actually checked.
         run: uv run iqssl-difficulty-report --data data/smoke --n-train 2000 --n-test 800 --epochs 20 --no-gate
-      # - name: Pretrain one method per family
-      #   run: |
-      #     for m in simclr mae ijepa; do
-      #       uv run iqssl-pretrain experiment=smoke_cpu method=$m
-      #     done
+      - name: Pretrain every registered method
+        # Twenty steps each. Not a convergence check -- it exercises the paths
+        # unit tests cannot: config composition, the dataloader, view building,
+        # checkpoint writing, and the fairness-contract validation.
+        run: |
+          for m in simclr supcon barlow vicreg byol simsiam; do
+            uv run iqssl-pretrain experiment=smoke_cpu method=$m
+          done
       # - name: Aggregate
-      #   run: uv run iqssl-aggregate root=outputs/smoke_cpu
+      #   run: uv run iqssl-aggregate root=outputs/smoke_cpu   # stage 9
 
   slow:
     # The tiny-overfit matrix over every method. Too slow for every PR, but a

@@ -296,3 +296,59 @@ class TestFairnessContract:
         assert merged.optimizer == "lars"
         assert merged.base_lr == 0.3
         assert merged.epochs == 10  # the experiment still governs this
+
+
+@pytest.mark.slow
+class TestTinyOverfit:
+    """Can each objective actually drive its own loss down?
+
+    A method can be wired correctly enough to run -- right shapes, finite loss,
+    no crash -- and still be optimizing nothing, because a detached tensor or a
+    swapped argument turned the objective into a constant. Every test above would
+    pass. These run each method on a handful of batches with augmentation off and
+    check the loss actually falls, which is the cheapest thing that distinguishes
+    "runs" from "learns".
+
+    Marked slow and run nightly: too expensive for every push, but a silent
+    collapse regression must not survive a night. This is what the `slow` CI job
+    was wired for.
+    """
+
+    @pytest.mark.parametrize("name", sorted(METHODS.keys()))
+    def test_loss_falls_on_a_tiny_set(self, name, dataset):
+        state = train(
+            _method(name, dataset, seed=0),
+            dataset,
+            _cfg(max_steps=60, batch_size=16, log_every=1, augment="light"),
+        )
+        losses = [row["loss"] for row in state.history if "loss" in row]
+        assert len(losses) > 20, name
+
+        early = float(np.mean(losses[:10]))
+        late = float(np.mean(losses[-10:]))
+        assert late < early, (
+            f"{name} did not reduce its loss over 60 steps "
+            f"(first-10 mean {early:.4f}, last-10 mean {late:.4f}). The method "
+            f"runs but may not be optimizing anything -- check for a detached "
+            f"tensor on the gradient path."
+        )
+
+    @pytest.mark.parametrize("name", sorted(METHODS.keys()))
+    def test_representation_does_not_collapse(self, name, dataset):
+        """The failure that is silent by construction.
+
+        Negative-free objectives collapse by mapping every input to one point,
+        and the loss falls *beautifully* while it happens. Per-dimension standard
+        deviation and effective rank both fall off a cliff, so they are the
+        canaries, and every method emits them every step.
+        """
+        state = train(
+            _method(name, dataset, seed=0),
+            dataset,
+            _cfg(max_steps=60, batch_size=16, log_every=1, augment="light"),
+        )
+        final = state.history[-1]
+        rankme = next(v for k, v in final.items() if k.endswith("rankme"))
+        std_min = next(v for k, v in final.items() if k.endswith("std_min"))
+        assert rankme > tol.MIN_RANKME, f"{name} collapsed: rankme {rankme:.2f}"
+        assert std_min > tol.MIN_FEATURE_STD, f"{name} collapsed: std_min {std_min:.2e}"

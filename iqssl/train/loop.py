@@ -274,8 +274,11 @@ class _OnlineProbe:
         if batch.y_primary is None:
             return {}
         with torch.no_grad():
-            feats = method.encoder(batch.x_raw)
-            h = feats.pooled("mean") if hasattr(feats, "pooled") else feats
+            # Both encoders return EncoderOut, and ResNet1D's `cls` field is its
+            # global-average pool, so mean pooling is defined for both. No
+            # isinstance branch: an encoder that did not satisfy the contract
+            # should fail loudly here rather than be silently accommodated.
+            h = method.encoder(batch.x_raw).pooled("mean")
         logits = self.head(h.detach())
         loss = nn.functional.cross_entropy(logits, batch.y_primary)
         self.opt.zero_grad(set_to_none=True)
