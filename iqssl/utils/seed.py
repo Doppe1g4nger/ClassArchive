@@ -87,6 +87,19 @@ def generator_from_key(key: int) -> np.random.Generator:
     return np.random.Generator(np.random.PCG64(key))
 
 
+def sample_stream(base_seed: int, index: int) -> np.random.Generator:
+    """The RNG for one dataset sample, in O(1) and without materializing others.
+
+    ``SeedSequence(entropy=s, spawn_key=(i,))`` is by construction identical to
+    ``SeedSequence(s).spawn(n)[i]`` for every ``n > i``, so this is both cheap
+    and prefix-stable: sample ``i`` is the same signal whether the dataset has a
+    thousand samples or ten million, generated in one process or thirty-two.
+    """
+    return np.random.Generator(
+        np.random.PCG64(np.random.SeedSequence(base_seed, spawn_key=(index,)))
+    )
+
+
 def torch_generator(seed: int, device: torch.device | str = "cpu") -> torch.Generator:
     """A torch generator for augmentation, kept separate from the global RNG.
 

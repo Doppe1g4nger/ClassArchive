@@ -43,6 +43,7 @@ def add_awgn(
     *,
     generator: torch.Generator | None = None,
     measured_power: Tensor | None = None,
+    unit_noise: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Add complex AWGN at a target SNR. Returns ``(noisy, noise_power)``.
 
@@ -50,6 +51,10 @@ def add_awgn(
     the power of exactly the samples it will *keep*, since PA compression and
     the fading realization both shift power by several dB and the retained crop
     is what the SNR label must describe.
+
+    ``unit_noise`` supplies externally-drawn unit-variance complex noise, so a
+    generated sample depends only on its own RNG stream rather than on how the
+    generation run happened to be batched.
     """
     if not x.is_complex():
         raise ValueError("add_awgn expects a complex input")
@@ -65,9 +70,11 @@ def add_awgn(
 
     # sigma^2 total per complex sample => sigma^2 / 2 per real component.
     sigma_component = (noise_power / 2.0).sqrt().unsqueeze(-1)
-    shape = x.shape
-    nr = torch.randn(shape, generator=generator, device=x.device, dtype=torch.float32)
-    ni = torch.randn(shape, generator=generator, device=x.device, dtype=torch.float32)
+    if unit_noise is None:
+        nr = torch.randn(x.shape, generator=generator, device=x.device, dtype=torch.float32)
+        ni = torch.randn(x.shape, generator=generator, device=x.device, dtype=torch.float32)
+    else:
+        nr, ni = unit_noise.real, unit_noise.imag
     noise = torch.complex(nr * sigma_component, ni * sigma_component)
     return x + noise, noise_power
 

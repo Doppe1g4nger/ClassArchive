@@ -135,6 +135,8 @@ def phase_noise(
     *,
     random_initial_phase: bool = True,
     generator: torch.Generator | None = None,
+    unit_steps: Tensor | None = None,
+    initial_phase: Tensor | None = None,
 ) -> Tensor:
     """Oscillator phase noise as a Wiener process.
 
@@ -146,6 +148,11 @@ def phase_noise(
     per-emitter starting phase would be a trivial identity leak: the model would
     read the fingerprint straight off sample zero instead of learning the
     spectral character of the oscillator, which is the actual signature.
+
+    ``unit_steps`` and ``initial_phase`` let a caller supply the randomness
+    instead of drawing it. The dataset generator uses this so that a sample's
+    signal depends only on its own RNG stream — otherwise regenerating with a
+    different chunk size would silently produce a different dataset.
     """
     b, ell = x.shape
     lw = torch.as_tensor(linewidth_hz, dtype=torch.float32, device=x.device)
@@ -153,13 +160,14 @@ def phase_noise(
         lw = lw.expand(b)
     step_std = torch.sqrt(2 * math.pi * lw / sample_rate_hz).unsqueeze(-1)
 
-    steps = (
-        torch.randn(b, ell, generator=generator, device=x.device, dtype=torch.float32) * step_std
-    )
-    theta = torch.cumsum(steps, dim=-1)
+    if unit_steps is None:
+        unit_steps = torch.randn(b, ell, generator=generator, device=x.device, dtype=torch.float32)
+    theta = torch.cumsum(unit_steps[:, :ell] * step_std, dim=-1)
     theta = theta - theta[:, :1]  # start the walk at zero, then offset explicitly
 
-    if random_initial_phase:
+    if initial_phase is not None:
+        theta = theta + initial_phase.to(x.device).view(b, 1)
+    elif random_initial_phase:
         phi0 = (
             torch.rand(b, 1, generator=generator, device=x.device, dtype=torch.float32)
             * 2

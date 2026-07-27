@@ -1,0 +1,265 @@
+"""The difficulty-calibration gate.
+
+    iqssl-difficulty-report --data data/synth_v1
+    iqssl-difficulty-report --data data/synth_v1 --label modulation
+
+Runs three reference estimators against a built dataset and prints whether the
+task sits in a band where SSL methods can actually be told apart. Exits nonzero
+when it does not, so CI and the build pipeline can treat it as a gate rather
+than as advice.
+
+Why this runs *before* any SSL method exists: if a handful of closed-form RF
+statistics already identify the emitter, then every method scores ~99%, the
+ranking is noise, and the entire comparison measures nothing. The opposite
+failure -- a task no supervised model can learn -- is equally fatal and equally
+invisible from inside a single training run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from iqssl.data.baselines import (
+    TARGET_BANDS,
+    BaselineResult,
+    run_classical_baseline,
+    run_raw_linear_baseline,
+    run_supervised_cnn_baseline,
+)
+from iqssl.data.dataset import IQDataset
+from iqssl.utils.logging_ import get_logger, setup_console_logging, write_json
+
+log = get_logger(__name__)
+
+
+def _stack(ds: IQDataset, idx: np.ndarray) -> torch.Tensor:
+    return torch.stack([ds[int(i)]["x"] for i in idx])
+
+
+def _subsample(n: int, cap: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    return rng.permutation(n)[:cap] if n > cap else np.arange(n)
+
+
+def run_report(
+    root: str | Path,
+    *,
+    label: str = "emitter",
+    n_train: int = 12000,
+    n_test: int = 3000,
+    epochs: int = 60,
+    seed: int = 0,
+    device: str = "cpu",
+) -> dict:
+    train = IQDataset(root, "train", primary_label=label, random_crop=False)  # type: ignore[arg-type]
+    test = IQDataset(root, "test", primary_label=label, random_crop=False)  # type: ignore[arg-type]
+
+    tr_idx = _subsample(len(train), n_train, seed)
+    te_idx = _subsample(len(test), n_test, seed + 1)
+
+    log.info("loading %d train / %d test buffers", len(tr_idx), len(te_idx))
+    xtr, xte = _stack(train, tr_idx), _stack(test, te_idx)
+    ytr = np.array([train[int(i)]["y_primary"] for i in tr_idx])
+    yte = np.array([test[int(i)]["y_primary"] for i in te_idx])
+    snr_te = test.snr[te_idx]
+
+    results: list[BaselineResult] = []
+    log.info("classical features ...")
+    results.append(run_classical_baseline(xtr, ytr, xte, yte))
+    log.info("raw-IQ linear probe ...")
+    results.append(run_raw_linear_baseline(xtr, ytr, xte, yte))
+    log.info("supervised CNN oracle (%d epochs) ...", epochs)
+    results.append(
+        run_supervised_cnn_baseline(
+            xtr, ytr, xte, yte, snr_te, epochs=epochs, device=device, seed=seed
+        )
+    )
+
+    snr_all = np.concatenate([train.snr, test.snr])
+    checks = _evaluate_bands(results, (float(snr_all.min()), float(snr_all.max())))
+    return {
+        "dataset": str(root),
+        "dataset_hash": train.dataset_hash,
+        "label": label,
+        "n_classes": train.num_primary_classes,
+        "chance": 1.0 / train.num_primary_classes,
+        "results": [r.__dict__ for r in results],
+        "checks": checks,
+        "passed": all(c["ok"] for c in checks),
+    }
+
+
+def _evaluate_bands(results: list[BaselineResult], snr_range: tuple[float, float]) -> list[dict]:
+    by_name = {r.name: r for r in results}
+    checks = []
+
+    for key, band in TARGET_BANDS.items():
+        if key == "supervised_cnn_high_snr":
+            value = by_name["supervised_cnn"].accuracy_high_snr
+        elif key == "supervised_cnn_0db":
+            value = by_name["supervised_cnn"].accuracy_0db
+        else:
+            value = by_name[key].accuracy
+
+        # A check with no data to evaluate is *not applicable*, not failed. The
+        # `easy` preset deliberately spans 15-30 dB, so it has no buffers near
+        # 0 dB; reporting that as a failure would tell the user to fix a preset
+        # that is behaving exactly as designed.
+        applicable = not (key == "supervised_cnn_0db" and not _spans_0db(snr_range))
+        if not applicable:
+            checks.append(
+                {
+                    "check": key,
+                    "value": float("nan"),
+                    "band": list(band),
+                    "ok": True,
+                    "applicable": False,
+                    "advice": f"not applicable: preset SNR range {snr_range} does not span 0 dB",
+                }
+            )
+            continue
+
+        ok = bool(band[0] <= value <= band[1]) if not np.isnan(value) else False
+        checks.append(
+            {
+                "check": key,
+                "value": float(value),
+                "band": list(band),
+                "ok": ok,
+                "applicable": True,
+                "advice": _advice(key, value, band),
+            }
+        )
+    return checks
+
+
+def _spans_0db(snr_range: tuple[float, float], margin: float = 3.0) -> bool:
+    return snr_range[0] <= margin and snr_range[1] >= -margin
+
+
+def _advice(key: str, value: float, band: tuple[float, float]) -> str:
+    if np.isnan(value):
+        return "not measurable -- is that SNR band populated?"
+    if band[0] <= value <= band[1]:
+        return ""
+    if key in ("classical", "raw_linear") and value > band[1]:
+        return (
+            "task is too easy: the fingerprint is trivially extractable, so every "
+            "SSL method will saturate. Narrow the emitter impairment spreads "
+            "(EmitterPrior in iqssl/data/params.py) or widen the channel nuisances."
+        )
+    if key.startswith("supervised_cnn") and value < band[0]:
+        return (
+            "task is too hard: even a supervised oracle cannot learn it, so method "
+            "rankings would be noise. Prefer lengthening the buffer (crop_len 1024 "
+            "-> 4096) over inflating impairments, which just makes it trivial again."
+        )
+    if key.startswith("supervised_cnn") and value > band[1]:
+        return "ceiling too high: methods will bunch near saturation. Narrow the emitter spreads."
+    return "outside target band"
+
+
+def _print_report(report: dict) -> None:
+    print()
+    print(f"Difficulty report -- {report['dataset']}")
+    print(f"  hash    {report['dataset_hash']}")
+    print(
+        f"  label   {report['label']}  ({report['n_classes']} classes, "
+        f"chance {report['chance']:.3f})"
+    )
+    print()
+    print(f"  {'estimator':<24} {'accuracy':>9}  {'notes'}")
+    print(f"  {'-' * 24} {'-' * 9}  {'-' * 44}")
+    for r in report["results"]:
+        print(f"  {r['name']:<24} {r['accuracy']:>9.3f}  {r['notes']}")
+        if not np.isnan(r["accuracy_high_snr"]):
+            print(f"  {'  @ high SNR':<24} {r['accuracy_high_snr']:>9.3f}")
+            print(f"  {'  @ 0 dB':<24} {r['accuracy_0db']:>9.3f}")
+    print()
+    print(f"  {'gate check':<28} {'value':>7} {'target band':>14}   result")
+    print(f"  {'-' * 28} {'-' * 7} {'-' * 14}   {'-' * 6}")
+    for c in report["checks"]:
+        band = f"[{c['band'][0]:.2f}, {c['band'][1]:.2f}]"
+        if not c.get("applicable", True):
+            mark, shown = "n/a ", "    -- "
+        else:
+            mark, shown = ("PASS" if c["ok"] else "FAIL"), f"{c['value']:>7.3f}"
+        print(f"  {c['check']:<28} {shown} {band:>14}   {mark}")
+        if c["advice"]:
+            for line in _wrap(c["advice"], 74):
+                print(f"      {line}")
+    print()
+    print("  GATE PASSED" if report["passed"] else "  GATE FAILED -- do not train SSL methods yet")
+    print()
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    import textwrap
+
+    return textwrap.wrap(text, width)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("--data", required=True, type=Path)
+    p.add_argument("--label", default="emitter", choices=["emitter", "modulation"])
+    p.add_argument("--n-train", type=int, default=12000)
+    p.add_argument("--n-test", type=int, default=3000)
+    p.add_argument(
+        "--epochs",
+        type=int,
+        default=60,
+        help=(
+            "oracle training epochs. Do not lower this casually: an undertrained "
+            "oracle reports 'task too hard' for a task that is merely unlearned, "
+            "and the advice it prints would send you to change the wrong thing. "
+            "On the easy preset, 30 epochs gives 0.81 at high SNR and 60 gives 0.89."
+        ),
+    )
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", default="cpu")
+    p.add_argument("--json-out", type=Path, default=None)
+    p.add_argument(
+        "--no-gate",
+        action="store_true",
+        help="report the numbers but always exit 0 (for exploratory calibration)",
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    setup_console_logging(logging.INFO)
+
+    report = run_report(
+        args.data,
+        label=args.label,
+        n_train=args.n_train,
+        n_test=args.n_test,
+        epochs=args.epochs,
+        seed=args.seed,
+        device=args.device,
+    )
+    _print_report(report)
+
+    if args.json_out:
+        write_json(args.json_out, report)
+    elif (Path(args.data) / "MANIFEST.json").exists():
+        write_json(Path(args.data) / f"difficulty_report_{args.label}.json", report)
+
+    if not report["passed"] and not args.no_gate:
+        print("difficulty gate failed; see advice above", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

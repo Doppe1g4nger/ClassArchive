@@ -98,12 +98,36 @@ def sample_taps(
     return gains.to(torch.complex64), delays.to(torch.float32)
 
 
-def build_cir(gains: Tensor, delays: Tensor, *, n_interp: int = INTERP_TAPS) -> Tensor:
+def cir_geometry(max_delay_samples: float, n_interp: int = INTERP_TAPS) -> tuple[int, int]:
+    """Deterministic ``(origin, length)`` for an impulse response.
+
+    Derived from the *prior's* maximum delay rather than from a batch's realized
+    delays. The generator needs this: if the impulse-response length depended on
+    which samples happened to share a batch, buffer geometry would shift with
+    the chunk size and a sample would stop being reproducible on its own.
+    """
+    k = n_interp // 2
+    origin = -(k - 1)
+    length = math.floor(max_delay_samples) + n_interp + 1
+    return origin, length
+
+
+def build_cir(
+    gains: Tensor,
+    delays: Tensor,
+    *,
+    n_interp: int = INTERP_TAPS,
+    origin: int | None = None,
+    out_len: int | None = None,
+) -> Tensor:
     """Compose fractionally-delayed taps into one discrete impulse response.
 
     Each tap contributes a windowed-sinc kernel centred at its fractional delay;
     summing them gives a single ``(B, cir_len)`` filter, so applying the channel
     is one convolution rather than one per tap.
+
+    Pass ``origin``/``out_len`` (see :func:`cir_geometry`) to fix the geometry
+    independently of the batch's realized delays.
     """
     b = gains.shape[0]
     device = gains.device
@@ -116,12 +140,21 @@ def build_cir(gains: Tensor, delays: Tensor, *, n_interp: int = INTERP_TAPS) -> 
     offsets = torch.arange(n_interp, device=device) - (k - 1)
     idx = base.long().unsqueeze(-1) + offsets  # (B, n_taps, n_interp)
 
-    lo = int(idx.min().item())
-    cir_len = int(idx.max().item()) - lo + 1
-    cir = torch.zeros(b, cir_len, dtype=torch.complex64, device=device)
+    if origin is None:
+        origin = int(idx.min().item())
+    if out_len is None:
+        out_len = int(idx.max().item()) - origin + 1
 
+    shifted = idx - origin
+    if int(shifted.min()) < 0 or int(shifted.max()) >= out_len:
+        raise ValueError(
+            f"tap delays fall outside the requested CIR window "
+            f"[{origin}, {origin + out_len}); widen it via cir_geometry()"
+        )
+
+    cir = torch.zeros(b, out_len, dtype=torch.complex64, device=device)
     contrib = gains.unsqueeze(-1) * taps  # (B, n_taps, n_interp)
-    cir.scatter_add_(1, (idx - lo).reshape(b, -1), contrib.reshape(b, -1))
+    cir.scatter_add_(1, shifted.reshape(b, -1), contrib.reshape(b, -1))
     return cir
 
 
