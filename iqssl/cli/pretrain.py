@@ -50,7 +50,15 @@ config to quietly ask for 200 epochs would invalidate the whole table.
 
 
 def _as_dict(node: Any) -> dict[str, Any]:
-    """OmegaConf container -> plain dict, narrowed for the type checker."""
+    """OmegaConf container or plain mapping -> plain dict.
+
+    Accepts plain dicts because `.get("train", {})` on a DictConfig returns the
+    Python default, not a config node — so a method config *without* a train
+    block handed OmegaConf.to_container a bare dict and crashed. Every method
+    config shipped with one until `supervised`, which is how it went unnoticed.
+    """
+    if isinstance(node, dict):
+        return dict(node)
     return cast(dict[str, Any], OmegaConf.to_container(node, resolve=True) or {})
 
 
