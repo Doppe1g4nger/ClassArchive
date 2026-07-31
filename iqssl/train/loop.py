@@ -153,7 +153,13 @@ def train(
             out / "config.json",
             {
                 "train": asdict(cfg),
-                "method": type(method).__name__,
+                # The registry key, not the class name: it is what configs, the
+                # CLI and eval.json all use, and a results table keyed on
+                # `RandomBaseline` where the user typed `random` is a table they
+                # have to translate. Falls back to the class name for a method
+                # constructed outside Hydra (tests do this).
+                "method": _method_name(method, method_cfg),
+                "method_class": type(method).__name__,
                 "view_spec": asdict(spec),
                 "dataset_hash": dataset.dataset_hash,
                 "total_steps": total_steps,
@@ -260,6 +266,18 @@ def train(
     if logger:
         logger.close()
     return state
+
+
+def _method_name(method: Method, cfg: Any) -> str:
+    """The method's registry key, falling back to its class name.
+
+    Hydra runs carry `cfg.method.name`; a method constructed directly (tests,
+    notebooks) has no config, and the class name is the best available answer.
+    """
+    try:
+        return str(cfg.method.name)
+    except AttributeError:
+        return type(method).__name__
 
 
 class _OnlineProbe:
