@@ -81,25 +81,23 @@ untested at the end.
 | 0. Scaffold, registry, contracts, CI | **done** | lint + types + tests green |
 | 1. `dsp/` signal primitives | **done** | 113 property tests; BER=0 clean path, every digital modulation |
 | 2. `data/` + difficulty gate | **done** | `easy` **PASSES** at 48k train buffers: classical 0.195, raw-IQ 0.062, oracle 0.891 @ high SNR |
-| 3. Encoders, heads, EMA, `Method` contract | **partial** | ViT1D/ResNet1D/EMA/heads done + tested; **training loop not yet written** |
+| 3. Encoders, heads, EMA, `Method` contract, training loop | **done** | one loop, no method branching; `iqssl-pretrain` works |
 | 4. `augment/` ops and five policies | **done** | ops, `none`/`light`/`standard`/`heavy`/`hardware_invariant`, masking, pipeline |
 | 5. View methods | **done** | SimCLR, SupCon, Barlow Twins, VICReg, BYOL, SimSiam |
-| 6. Masked / latent methods | not started | MAE decoder and mask generators written; MAE, I-JEPA, TS-JEPA, data2vec not wired |
-| 7. Full eval protocol | not started | |
+| 6. Masked / latent methods + references | **done** | MAE; I-JEPA/TS-JEPA/data2vec as a shared-machinery 3-axis ablation; `supervised` ceiling, `random` floor |
+| 7. Full eval protocol | **done** | `iqssl-evaluate`: linear probe + kNN + finetune at 1%/10%/100%, nuisance R², SNR quartiles |
 | 8. Configs + equal-budget HPO | **partial** | Hydra tree and per-method configs exist; no HPO sweeper yet |
-| 9. Analysis and aggregation | not started | |
+| 9. Analysis and aggregation | not started | `iqssl-aggregate` unregistered until it exists |
 
-**What runs today:** everything through pretraining. `iqssl-pretrain` trains any
-of the six view methods end to end, on CPU, writing `metrics.csv`, a config
-snapshot, run provenance and a checkpoint. `iqssl-build-dataset` and
-`iqssl-difficulty-report` work as before.
+**What runs today:** the full train-and-measure path. All twelve registered
+methods pretrain through the one shared loop, and `iqssl-evaluate` scores any
+run — probe, kNN and finetune at three label fractions on both label axes, the
+nuisance-regression probe, and accuracy by SNR quartile — writing `eval.json`
+next to the checkpoint. Evaluation refuses a dataset whose hash differs from
+the one the run was pretrained on.
 
-**What does not run yet:** `iqssl-evaluate` and `iqssl-aggregate` do not exist,
-so nothing yet measures a *representation* — pretraining logs an online probe as
-a diagnostic, and that is not the evaluation protocol. The four masked and
-latent-prediction methods are not wired, though the pieces they need (patch
-decoder, `random`/`block`/`causal` mask generation, the ViT's three forward
-paths) are built and tested.
+**What does not run yet:** `iqssl-aggregate` (stage 9) and the equal-budget HPO
+sweeper (stage 8). Method rankings from single unswept runs are not results.
 
 ### A note on the gitignore incident
 
@@ -188,9 +186,9 @@ iqssl-build-dataset --out data/smoke --difficulty smoke --n-samples 4096
 iqssl-difficulty-report --data data/smoke --no-gate   # the gate; see calibration below
 
 iqssl-pretrain experiment=smoke_cpu method=simclr     # ~20 steps on CPU
+iqssl-evaluate --run outputs/smoke_cpu/simclr/seed0/<timestamp>
 
 # Not implemented yet -- see Implementation status above.
-# iqssl-evaluate run=outputs/smoke_cpu/simclr/seed0/<timestamp>
 # iqssl-aggregate root=outputs/smoke_cpu
 ```
 
@@ -198,7 +196,7 @@ Sweep across methods and seeds (`-m` is Hydra's multirun):
 
 ```bash
 iqssl-pretrain -m experiment=main_comparison \
-  method=simclr,supcon,barlow,vicreg,byol,simsiam \
+  method=simclr,supcon,barlow,vicreg,byol,simsiam,mae,ijepa,tsjepa,data2vec,supervised,random \
   seed=0,1,2
 ```
 

@@ -27,6 +27,7 @@ htmlcov/
 /wandb/
 *.pt
 *.ckpt
+*.log
 *.npy
 *.parquet
 !/results/frozen/*.parquet

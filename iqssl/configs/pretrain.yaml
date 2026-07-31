@@ -6,6 +6,12 @@ defaults:
   - method: simclr
   - data: smoke
   - experiment: smoke_cpu
+  # Hydra's default job logging writes <job>.log into the working directory,
+  # which with run.dir="." means a stray log file in the repository root (one
+  # got committed before this override existed). Console logging is configured
+  # by setup_console_logging; Hydra should configure nothing. Overrides must
+  # sit last in the defaults list.
+  - override hydra/job_logging: none
 
 experiment: smoke_cpu
 output_root: outputs
