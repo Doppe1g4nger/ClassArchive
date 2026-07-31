@@ -162,6 +162,46 @@ label fractions on both label axes, so six full finetunes per run — 72 across 
 twelve-method sweep, which can exceed the pretraining it evaluates. Reporting
 both axes is deliberate, but budget for it.
 
+### The `easy`-scale viability gate: undertrained, not unlearnable
+
+`experiment=easy_long` asks the question that governs whether a ~324-run sweep is
+worth building toward: on data the difficulty gate certified (a SmallCNN reaches
+0.891 here), does the benchmark's own encoder, loop and eval protocol reproduce
+that? Measured at 5,600 steps × 128 = 717k samples, single seed:
+
+| | emitter probe @100% | modulation probe @100% |
+| --- | --- | --- |
+| `supervised` | 0.103 | 0.541 |
+| `random` | 0.092 | 0.523 |
+| chance | 0.0625 | 0.100 |
+
+**The ceiling does not clear the floor on either axis.** Supervised training buys
+~0.01 over an untrained encoder — within seed noise. A twelve-method sweep at
+this budget would produce a table in which every method scores about the same as
+random features, which is precisely the outcome the gate exists to prevent.
+
+But the training curve says *undertrained*, not *unlearnable*, and the
+distinction is the whole point of logging train accuracy:
+
+```
+step     0-3600 : loss 2.773 (= ln 16), train_acc 0.062 (= chance)   -- flat
+step  4000-5200 : loss 2.765 -> 2.680,  train_acc 0.072 -> 0.105     -- descending
+```
+
+The model sat at chance for 3,600 steps, began learning around step 4,000, and
+the budget ended 1,600 steps later with the curve still bending. Train accuracy
+(0.105) tracks test (0.103), so it is underfitting — more data would not help,
+more optimization might. Extrapolating the inflection, something like 20k steps
+(~5 h on four CPU cores) would be needed to find out.
+
+**Do not read a method ranking off this preset yet, and do not launch the full
+sweep until a ceiling clears its floor here.** The open question is whether the
+ViT gets there with more steps or whether the control encoder should become
+`cnn1d` — which the difficulty gate's CNN result mildly favours, at ~5.8x the
+cost per step (measured: 0.185 steps/s against the ViT's 1.08, because the ViT's
+stride-16 patch embedding discards 15/16 of the sequence before any attention
+runs, while the CNN stem processes it at full resolution).
+
 ### A note on the gitignore incident
 
 `iqssl/data/` was absent from the first four commits on this branch. `.gitignore`
