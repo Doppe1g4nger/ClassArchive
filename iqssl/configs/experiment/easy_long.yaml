@@ -1,23 +1,44 @@
 # @package _global_
-# The viability gate: is the headline task learnable at all by the control
-# encoder, at a scale where the difficulty gate already showed a small CNN
-# reaching 0.891?
+# The viability gate: can the benchmark's own encoder, loop and eval protocol
+# reproduce a task the difficulty gate already showed is learnable?
 #
-# At smoke scale every method probes at chance on emitter identity, including
-# the supervised ceiling -- diagnosed as a data-starved ViT (it memorizes 64
-# buffers perfectly but cannot generalize from 2,861). This experiment answers
-# the question that governs whether a 324-run sweep is worth building toward.
-# Long enough to matter, short enough to finish on CPU.
+# At smoke scale every method probes at chance on emitter identity, the
+# supervised ceiling included -- diagnosed as a data-starved ViT (it memorizes
+# 64 buffers perfectly but cannot generalize from 2,861). This experiment
+# answers the question that governs whether a ~324-run sweep is worth building
+# toward: does the ceiling clear the floor?
+#
+# The step budget is set from a measurement, and the measurement corrected two
+# wrong beliefs worth recording:
+#
+#   * A first estimate of 0.344 steps/s was taken while an eight-run sweep was
+#     competing for the same four cores. Idle, the same config runs at 1.08 --
+#     3.1x faster. Never size a budget from a contended timing.
+#   * cnn1d was briefly adopted here on the theory that a convolutional encoder
+#     avoids attention's quadratic cost. Measured, it is ~1.9x *slower*: the
+#     ViT's stride-16 patch embedding discards 15/16 of the sequence before any
+#     attention runs, while the CNN stem processes it at full resolution.
+#
+# 5,600 steps x 128 = 717k samples, matching the sample budget that took the
+# difficulty gate's SmallCNN to 0.891 on this data (12k buffers x 60 epochs).
+# Spent over the full 84k train split rather than a 12k subset, since more
+# unique data beats more repetitions at equal compute. ~90 minutes.
+#
+# Evaluate with --skip-finetune: the linear probe answers the binary question,
+# and six finetunes per run cost hours that buy nothing here.
 experiment: easy_long
 data:
   root: data/easy
 train:
-  epochs: 6
+  epochs: 20
   batch_size: 128
-  max_steps: 3000
+  max_steps: 5600
   device: cpu
-  log_every: 200
+  log_every: 400
   probe_every: 0
+  # Loading and cropping 120k memmapped buffers is a real share of each step,
+  # and it was serialised with training at the default num_workers=0.
+  num_workers: 3
   # `light` is phase + small timing only, measured to cost the emitter
   # fingerprint nothing (d = 13.4 unaugmented, 13.4 under light). The gate asks
   # whether the encoder *can* learn the task; augmentation strength is a

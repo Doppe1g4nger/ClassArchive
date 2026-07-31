@@ -1,0 +1,6 @@
+# The CPU-tractable CNN. Fully convolutional, so no quadratic attention cost in
+# sequence length -- which is what makes a 1024-sample buffer affordable here
+# where vit1d was not.
+name: cnn1d
+args:
+  size: tiny
