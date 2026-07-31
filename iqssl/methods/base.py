@@ -141,6 +141,26 @@ class Method(nn.Module, abc.ABC):
             }
 
 
+def cfg_method_arg(cfg: Any, name: str, default: Any) -> Any:
+    """Read ``cfg.method.args.<name>``, tolerating a missing or None cfg.
+
+    Exists for the masked methods' ``view_spec`` classmethods: mask geometry
+    lives in the ViewSpec, the ViewSpec is built before the method instance, and
+    the only configuration available at that point is the raw Hydra tree. This
+    is the one sanctioned way to reach into it, so the instance argument and the
+    spec cannot come from two different sources and silently disagree.
+    """
+    try:
+        args = cfg.method.args
+    except AttributeError:
+        return default
+    try:
+        value = args.get(name, default)
+    except AttributeError:
+        return default
+    return default if value is None else value
+
+
 def rankme(z: Tensor, eps: float = 1e-7) -> Tensor:
     """Effective rank: ``exp(H(sigma / sum(sigma)))`` over singular values.
 

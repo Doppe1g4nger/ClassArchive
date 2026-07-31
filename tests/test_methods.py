@@ -41,15 +41,43 @@ def tiny_encoder() -> ViT1D:
     )
 
 
-def fake_batch(b: int = 8, n_views: int = 2, n_classes: int = 4) -> Batch:
+def fake_batch(
+    b: int = 8, n_views: int = 2, n_classes: int = 4, spec: ViewSpec | None = None
+) -> Batch:
+    """A batch shaped the way ``spec`` asks, masks included.
+
+    The contract tests hand every registered method a batch built from its own
+    ``view_spec()``; ignoring ``needs_mask`` here would make the whole masked
+    family untestable through the shared parametrized suite.
+    """
     g = torch.Generator().manual_seed(0)
     x = torch.randn(b, 2, SEQ_LEN, generator=g)
+    masks = None
+    if spec is not None and spec.needs_mask:
+        from iqssl.augment.masking import make_jepa_masks, make_mask
+
+        n_tokens = SEQ_LEN // PATCH
+        if spec.mask_kind == "jepa":
+            masks = make_jepa_masks(b, n_tokens, ratio=spec.mask_ratio, generator=g)
+        else:
+            assert spec.mask_kind is not None
+            masks = {
+                "mask": make_mask(
+                    b,
+                    n_tokens,
+                    spec.mask_kind,
+                    ratio=spec.mask_ratio,
+                    block_size=spec.mask_block_size,
+                    generator=g,
+                )
+            }
     return Batch(
         x_raw=x,
         views=[torch.randn(b, 2, SEQ_LEN, generator=g) for _ in range(n_views)],
         y_primary=torch.arange(b) % n_classes,
         y_mod=torch.arange(b) % n_classes,
         y_emitter=torch.arange(b) % n_classes,
+        masks=masks,
     )
 
 
@@ -460,7 +488,7 @@ class TestMethodContract:
     def test_forward_returns_a_finite_scalar_loss(self, name):
         method = self._build(name)
         spec = METHODS.get(name).view_spec()
-        out = method(fake_batch(n_views=max(spec.n_views, 1)), step=0, total_steps=10)
+        out = method(fake_batch(n_views=max(spec.n_views, 1), spec=spec), step=0, total_steps=10)
         assert out.loss.ndim == 0
         assert torch.isfinite(out.loss)
         assert "loss" in out.logs
@@ -468,14 +496,14 @@ class TestMethodContract:
     def test_backward_produces_encoder_gradients(self, name):
         method = self._build(name)
         spec = METHODS.get(name).view_spec()
-        method(fake_batch(n_views=max(spec.n_views, 1)), 0, 10).loss.backward()
+        method(fake_batch(n_views=max(spec.n_views, 1), spec=spec), 0, 10).loss.backward()
         grads = [p.grad for p in method.encoder.parameters() if p.requires_grad]
         assert any(g is not None and torch.isfinite(g).all() and g.abs().sum() > 0 for g in grads)
 
     def test_logs_a_collapse_canary(self, name):
         method = self._build(name)
         spec = METHODS.get(name).view_spec()
-        logs = method(fake_batch(n_views=max(spec.n_views, 1)), 0, 10).logs
+        logs = method(fake_batch(n_views=max(spec.n_views, 1), spec=spec), 0, 10).logs
         assert any(k.endswith("std_mean") for k in logs), "no collapse canary logged"
 
     def test_param_groups_cover_every_trainable_parameter(self, name):
@@ -502,3 +530,102 @@ def test_method_raises_a_clear_error_when_views_are_missing():
     method = METHODS.get("simclr")(tiny_encoder())
     with pytest.raises(ValueError, match="SimCLR needs 2 views"):
         method(fake_batch(n_views=1), 0, 10)
+
+
+class TestPatchify:
+    def test_round_trip(self):
+        from iqssl.methods.losses import patchify, unpatchify
+
+        x = torch.randn(3, 2, 64)
+        assert torch.equal(unpatchify(patchify(x, 16), 16), x)
+
+    def test_rejects_indivisible_length(self):
+        from iqssl.methods.losses import patchify
+
+        with pytest.raises(ValueError, match="divisible"):
+            patchify(torch.randn(1, 2, 65), 16)
+
+
+class TestMaskedLosses:
+    def test_masked_mse_ignores_visible_positions(self):
+        """The property that makes it a prediction task rather than an
+        autoencoder: error at visible patches must contribute nothing."""
+        from iqssl.methods.losses import masked_mse, patchify
+
+        p = patchify(torch.randn(4, 2, 64), 16)
+        mask = torch.zeros(4, 4, dtype=torch.bool)
+        mask[:, :2] = True
+        corrupted = p.clone()
+        corrupted[:, 2:] += 100.0  # visible positions only
+        loss, _ = masked_mse(corrupted, p, mask)
+        assert float(loss) == 0.0
+
+    def test_masked_mse_counts_masked_error(self):
+        from iqssl.methods.losses import masked_mse
+
+        p = torch.zeros(2, 4, 8)
+        pred = p.clone()
+        pred[:, 0] = 1.0
+        mask = torch.zeros(2, 4, dtype=torch.bool)
+        mask[:, 0] = True
+        loss, _ = masked_mse(pred, p, mask)
+        assert float(loss) == pytest.approx(1.0)
+
+    def test_target_normalization_is_per_patch(self):
+        from iqssl.methods.losses import masked_mse
+
+        target = torch.randn(2, 4, 16) * 5 + 3
+        mask = torch.ones(2, 4, dtype=torch.bool)
+        # Predicting the standardized target exactly gives zero loss.
+        std = (target - target.mean(-1, keepdim=True)) / (
+            target.var(-1, keepdim=True) + 1e-6
+        ).sqrt()
+        loss, _ = masked_mse(std, target, mask, normalize_targets=True)
+        assert float(loss) < 1e-6
+
+    def test_masked_smooth_l1_restricts_to_mask(self):
+        from iqssl.methods.losses import masked_smooth_l1
+
+        pred = torch.zeros(2, 4, 8)
+        target = torch.zeros(2, 4, 8)
+        pred[:, 3] = 10.0  # unmasked position
+        mask = torch.zeros(2, 4, dtype=torch.bool)
+        mask[:, 0] = True
+        assert float(masked_smooth_l1(pred, target, mask)) == 0.0
+
+
+class TestMAE:
+    def _mae(self):
+        from iqssl.models.vit1d import vit1d
+
+        return METHODS.get("mae")(vit1d(size="tiny", seq_len=256, patch_size=16))
+
+    def test_encoder_never_sees_masked_tokens(self):
+        """The load-bearing property. Change a masked patch in the input: the
+        loss changes (the target moved) but the *latent* must not."""
+        from iqssl.augment.masking import keep_indices, make_mask
+
+        torch.manual_seed(0)
+        m = self._mae()
+        m.eval()
+        x = torch.randn(2, 2, 256)
+        mask = make_mask(2, 16, "random", ratio=0.75, generator=torch.Generator().manual_seed(0))
+        keep_idx, _ = keep_indices(mask)
+
+        with torch.no_grad():
+            a = m.encoder.forward_masked(x, keep_idx)
+            x2 = x.clone()
+            first_masked = int(mask[0].nonzero()[0])
+            x2[0, :, first_masked * 16 : (first_masked + 1) * 16] += 99.0
+            b = m.encoder.forward_masked(x2, keep_idx)
+        assert torch.allclose(a, b, atol=1e-5)
+
+    def test_declares_fractional_compute(self):
+        assert self._mae().encoder_passes_per_step() == (0.25, 0.0)
+
+    def test_view_spec_reads_ratio_from_cfg(self):
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.create({"method": {"name": "mae", "args": {"mask_ratio": 0.5}}})
+        assert METHODS.get("mae").view_spec(cfg).mask_ratio == 0.5
+        assert METHODS.get("mae").view_spec(None).mask_ratio == 0.75

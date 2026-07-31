@@ -172,3 +172,63 @@ def negative_cosine(p: Tensor, z: Tensor) -> Tensor:
     which matters because it is the single line that prevents collapse.
     """
     return (2 - 2 * (F.normalize(p, dim=-1) * F.normalize(z, dim=-1)).sum(-1)).mean()
+
+
+def patchify(x: Tensor, patch_size: int) -> Tensor:
+    """``(B, C, L)`` -> ``(B, N, patch_size * C)``, channel-major within a patch.
+
+    The layout must match what :class:`~iqssl.models.heads.PatchDecoder`'s output
+    head is trained against; both sides go through this one function so the
+    pairing cannot drift.
+    """
+    b, c, ell = x.shape
+    if ell % patch_size:
+        raise ValueError(f"length {ell} is not divisible by patch_size {patch_size}")
+    n = ell // patch_size
+    return x.reshape(b, c, n, patch_size).permute(0, 2, 1, 3).reshape(b, n, c * patch_size)
+
+
+def unpatchify(p: Tensor, patch_size: int, in_ch: int = 2) -> Tensor:
+    """Inverse of :func:`patchify`. Used by tests and reconstruction plots."""
+    b, n, d = p.shape
+    if d != patch_size * in_ch:
+        raise ValueError(f"patch dim {d} != patch_size*in_ch = {patch_size * in_ch}")
+    return p.reshape(b, n, in_ch, patch_size).permute(0, 2, 1, 3).reshape(b, in_ch, n * patch_size)
+
+
+def masked_mse(
+    pred: Tensor, target: Tensor, mask: Tensor, *, normalize_targets: bool = False
+) -> tuple[Tensor, dict[str, float]]:
+    """MSE over **masked** positions only. ``mask`` is ``(B, N)``, True = masked.
+
+    Restricting the loss to masked positions is not an optimization: including
+    the visible patches turns a prediction task into a partial autoencoder, and
+    the encoder can lower the loss by copying inputs instead of inferring the
+    hidden ones.
+
+    ``normalize_targets`` standardizes each target patch to zero mean and unit
+    variance (MAE's ``norm_pix_loss``). It defaults **off** here, deliberately:
+    per-patch normalization erases the amplitude envelope, and for OOK the
+    envelope *is* the modulation -- signal, not nuisance. Enable it only as an
+    explicit ablation.
+    """
+    if normalize_targets:
+        mean = target.mean(-1, keepdim=True)
+        var = target.var(-1, keepdim=True)
+        target = (target - mean) / (var + 1e-6).sqrt()
+
+    per_patch = (pred - target).pow(2).mean(-1)  # (B, N)
+    denom = mask.sum().clamp_min(1)
+    loss = (per_patch * mask).sum() / denom
+    return loss, {"masked_frac": float(mask.float().mean())}
+
+
+def masked_smooth_l1(pred: Tensor, target: Tensor, mask: Tensor, beta: float = 1.0) -> Tensor:
+    """Smooth L1 over masked positions, for the latent-prediction family.
+
+    Smooth L1 rather than plain MSE because latent targets come from an EMA
+    teacher whose scale drifts over training; the linear tail keeps an early
+    large-residual batch from dominating the step.
+    """
+    per_tok = F.smooth_l1_loss(pred, target, beta=beta, reduction="none").mean(-1)  # (B, N)
+    return (per_tok * mask).sum() / mask.sum().clamp_min(1)
