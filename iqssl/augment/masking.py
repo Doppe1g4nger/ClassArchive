@@ -96,12 +96,20 @@ def _block(
 def _causal(
     b: int, n: int, ratio: float, g: Generator | None, device: torch.device | str
 ) -> Tensor:
-    """Mask a suffix. The split point jitters around ``1 - ratio``."""
+    """Mask a suffix. The split point jitters around ``1 - ratio``.
+
+    One split per *batch*, shared by every row — not per sample. TS-JEPA drops
+    its context tokens through the same rectangular gather as MAE, so every
+    sample in a batch must keep the same number of tokens; per-row splits would
+    ragged the gather and force a pad token the student can attend to. The
+    jitter still varies step to step, which is where it earns its keep.
+    """
     centre = (1.0 - ratio) * n
-    jitter = (torch.rand(b, generator=g, device=device) - 0.5) * 0.2 * n
-    split = (centre + jitter).clamp(1, n - 1).long()
+    jitter = (torch.rand(1, generator=g, device=device) - 0.5) * 0.2 * n
+    split = int((centre + float(jitter)).__trunc__())
+    split = max(1, min(n - 1, split))
     idx = torch.arange(n, device=device).unsqueeze(0)
-    return idx >= split.unsqueeze(-1)
+    return (idx >= split).expand(b, n).clone()
 
 
 def make_jepa_masks(

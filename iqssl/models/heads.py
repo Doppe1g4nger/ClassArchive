@@ -153,3 +153,63 @@ class PatchDecoder(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         return self.pred(self.norm(x))[:, 1:]
+
+
+class LatentPredictor(nn.Module):
+    """JEPA predictor: a narrow transformer that predicts *latents* at target
+    positions from context-token embeddings.
+
+    Structurally :class:`PatchDecoder` with an embed-dim output instead of
+    pixels, and with explicit position indices instead of an un-shuffle: the
+    predictor sees [projected context tokens + mask-token queries], each stamped
+    with the positional embedding of where it actually sits, and reads out only
+    the query positions.
+
+    Narrow (dim 192, depth 4) for the same reason the MAE decoder is: it is
+    discarded after pretraining, and capacity spent here is capacity the
+    comparison never measures. A predictor as wide as the encoder would also
+    blur the ablation -- the trio varies *where targets come from*, not how much
+    machinery predicts them.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_patches: int,
+        predictor_dim: int = 192,
+        depth: int = 4,
+        num_heads: int = 3,
+    ) -> None:
+        super().__init__()
+        from iqssl.models.vit1d import Block, sincos_positional_embedding
+
+        self.embed = nn.Linear(embed_dim, predictor_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_dim))
+        self.register_buffer(
+            "pos_embed", sincos_positional_embedding(num_patches, predictor_dim), persistent=False
+        )
+        self.blocks = nn.ModuleList([Block(predictor_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(predictor_dim)
+        self.proj = nn.Linear(predictor_dim, embed_dim)
+        nn.init.trunc_normal_(self.mask_token, std=0.02)
+
+    def _pos_at(self, idx: Tensor) -> Tensor:
+        """Gather positional embeddings at per-sample indices ``(B, K)``."""
+        pos = self.pos_embed.expand(idx.shape[0], -1, -1)  # type: ignore[union-attr, operator]
+        return torch.gather(pos, 1, idx.unsqueeze(-1).expand(-1, -1, pos.shape[-1]))
+
+    def forward(self, context: Tensor, context_idx: Tensor, target_idx: Tensor) -> Tensor:
+        """``context`` is ``(B, N_ctx, D)`` encoder tokens; returns ``(B, N_tgt, D)``.
+
+        Both index tensors are token positions in the *original* sequence, so
+        context and queries carry honest positions even though neither is at its
+        original offset in the concatenated input.
+        """
+        x = self.embed(context) + self._pos_at(context_idx)
+        q = self.mask_token.expand(target_idx.shape[0], target_idx.shape[1], -1) + self._pos_at(
+            target_idx
+        )
+        full = torch.cat([x, q], dim=1)
+        for blk in self.blocks:
+            full = blk(full)
+        return self.proj(self.norm(full)[:, x.shape[1] :])
