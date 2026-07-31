@@ -495,6 +495,8 @@ class TestMethodContract:
 
     def test_backward_produces_encoder_gradients(self, name):
         method = self._build(name)
+        if not getattr(method, "trainable", True):
+            pytest.skip("deliberately non-trainable (the random floor)")
         spec = METHODS.get(name).view_spec()
         method(fake_batch(n_views=max(spec.n_views, 1), spec=spec), 0, 10).loss.backward()
         grads = [p.grad for p in method.encoder.parameters() if p.requires_grad]

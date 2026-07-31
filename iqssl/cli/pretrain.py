@@ -14,6 +14,7 @@ the aggregator refuses to pool runs whose hashes disagree.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -68,7 +69,7 @@ def merge_train_config(cfg: DictConfig) -> TrainConfig:
     return TrainConfig(**{**base, **overrides})
 
 
-def build_method(cfg: DictConfig, seq_len: int, seed: int = 0) -> Any:
+def build_method(cfg: DictConfig, seq_len: int, seed: int = 0, n_classes: int | None = None) -> Any:
     """Construct encoder then method.
 
     The encoder is built here rather than inside the method because it is the
@@ -97,7 +98,21 @@ def build_method(cfg: DictConfig, seq_len: int, seed: int = 0) -> Any:
     encoder = encoder_factory(seq_len=seq_len, **_as_dict(cfg.encoder.args))
 
     method_cls = METHODS.get(cfg.method.name)
-    return method_cls(encoder, cfg, **_as_dict(cfg.method.args))
+    kwargs = _as_dict(cfg.method.args)
+
+    # A method whose signature asks for n_classes gets the dataset's true count
+    # unless the config pinned one explicitly. The class count is a dataset
+    # property, not a method hyperparameter, and a config default that happened
+    # to be smaller than the label range would fail only at the first unlucky
+    # batch — deep inside cross_entropy, long after construction.
+    if (
+        n_classes is not None
+        and "n_classes" not in kwargs
+        and "n_classes" in inspect.signature(method_cls.__init__).parameters
+    ):
+        kwargs["n_classes"] = n_classes
+
+    return method_cls(encoder, cfg, **kwargs)
 
 
 @hydra.main(version_base=None, config_path=str(CONFIG_DIR), config_name="pretrain")
@@ -112,7 +127,9 @@ def main(cfg: DictConfig) -> float:
         crop_len=cfg.data.crop_len,
     )
 
-    method = build_method(cfg, dataset.crop_len, seed=cfg.train.seed)
+    method = build_method(
+        cfg, dataset.crop_len, seed=cfg.train.seed, n_classes=dataset.num_primary_classes
+    )
     train_cfg = merge_train_config(cfg)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")

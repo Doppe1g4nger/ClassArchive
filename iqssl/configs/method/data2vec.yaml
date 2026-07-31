@@ -1,0 +1,9 @@
+name: data2vec
+args:
+  mask_ratio: 0.5
+  top_k_layers: 4
+  beta: 1.0
+train:
+  optimizer: adamw
+  base_lr: 1.0e-3
+  weight_decay: 0.01

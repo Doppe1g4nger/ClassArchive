@@ -1,0 +1,13 @@
+name: mae
+args:
+  mask_ratio: 0.75
+  decoder_dim: 192
+  decoder_depth: 4
+  # normalize_targets stays off by default: per-patch standardization erases
+  # the amplitude envelope, and for OOK the envelope IS the modulation.
+  normalize_targets: false
+# AdamW per the paper; masked methods were not published with LARS.
+train:
+  optimizer: adamw
+  base_lr: 1.5e-3
+  weight_decay: 0.05

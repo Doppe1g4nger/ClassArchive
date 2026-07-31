@@ -1,0 +1,8 @@
+name: random
+# The floor. Pretraining is a no-op pass-through; the run exists so the frozen
+# encoder flows through the identical checkpoint/eval pipeline as every method.
+args: {}
+train:
+  optimizer: adamw
+  base_lr: 1.0e-3
+  weight_decay: 0.0

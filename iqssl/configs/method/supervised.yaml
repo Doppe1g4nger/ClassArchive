@@ -1,0 +1,8 @@
+name: supervised
+# n_classes is filled from the dataset by the CLI; pinning it here would tie
+# the config to one dataset.
+args: {}
+train:
+  optimizer: adamw
+  base_lr: 1.0e-3
+  weight_decay: 0.05

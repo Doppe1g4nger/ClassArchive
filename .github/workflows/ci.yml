@@ -68,9 +68,10 @@ jobs:
       - name: Pretrain every registered method
         # Twenty steps each. Not a convergence check -- it exercises the paths
         # unit tests cannot: config composition, the dataloader, view building,
-        # checkpoint writing, and the fairness-contract validation.
+        # masking, checkpoint writing, and the fairness-contract validation.
         run: |
-          for m in simclr supcon barlow vicreg byol simsiam; do
+          for m in simclr supcon barlow vicreg byol simsiam \
+                   mae ijepa tsjepa data2vec supervised random; do
             uv run iqssl-pretrain experiment=smoke_cpu method=$m
           done
       # - name: Aggregate

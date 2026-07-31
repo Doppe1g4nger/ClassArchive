@@ -316,6 +316,8 @@ class TestTinyOverfit:
 
     @pytest.mark.parametrize("name", sorted(METHODS.keys()))
     def test_loss_falls_on_a_tiny_set(self, name, dataset):
+        if not getattr(METHODS.get(name), "trainable", True):
+            pytest.skip("deliberately non-trainable (the random floor)")
         state = train(
             _method(name, dataset, seed=0),
             dataset,
