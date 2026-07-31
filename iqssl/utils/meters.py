@@ -84,12 +84,21 @@ class ComputeMeter:
     peak_memory_bytes: int = 0
     _t0: float = field(default_factory=time.perf_counter, repr=False)
 
-    def add_forward(self, batch_size: int, n_tokens: int, *, teacher: bool = False) -> None:
-        self.tokens_seen += batch_size * n_tokens
+    def add_forward(
+        self, batch_size: int, n_tokens: int, *, teacher: bool = False, weight: float = 1.0
+    ) -> None:
+        """Record ``weight`` encoder passes over ``n_tokens`` tokens each.
+
+        ``weight`` may be fractional (MAE's pass over 25% of the tokens is 0.25
+        of a pass) or count several passes at once (a two-view method's step is
+        weight 2). The token total scales with it so both ledgers stay
+        consistent.
+        """
+        self.tokens_seen += round(batch_size * n_tokens * weight)
         if teacher:
-            self.teacher_forwards += 1.0
+            self.teacher_forwards += weight
         else:
-            self.encoder_forwards += 1.0
+            self.encoder_forwards += weight
 
     def add_step(self, batch_size: int) -> None:
         self.samples_seen += batch_size

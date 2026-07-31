@@ -317,6 +317,42 @@ class TestMasking:
         shuffled = torch.gather(full, 1, mask.long().argsort(dim=1, stable=True))
         assert torch.equal(torch.gather(shuffled, 1, restore), full)
 
+    def test_jepa_context_and_targets_partition_correctly(self):
+        from iqssl.augment.masking import make_jepa_masks
+
+        m = make_jepa_masks(16, 64, ratio=0.5, n_targets=4, generator=_g())
+        ctx, tgt = m["context"], m["targets"]
+        assert ctx.shape == (16, 64) and tgt.shape == (16, 4, 64)
+        # Context is exactly the complement of the target union -- a token that
+        # is neither visible nor predicted would be silently wasted input.
+        assert torch.equal(ctx, ~tgt.any(dim=1))
+        assert ctx.any(dim=-1).all(), "empty context: student would see nothing"
+        assert tgt.any(dim=-1).all(), "an empty target block predicts nothing"
+
+    def test_jepa_target_blocks_are_disjoint_and_contiguous(self):
+        from iqssl.augment.masking import make_jepa_masks
+
+        m = make_jepa_masks(8, 64, ratio=0.5, n_targets=4, generator=_g())
+        tgt = m["targets"]
+        # Disjoint: overlapping blocks would give samples ragged context sizes,
+        # and forward_masked's gather must stay rectangular.
+        assert (tgt.int().sum(dim=1) <= 1).all()
+        for row in tgt.flatten(0, 1):
+            on = row.nonzero().flatten()
+            assert (on[-1] - on[0] + 1) == len(on), "target block is not contiguous"
+
+    def test_jepa_context_size_is_uniform(self):
+        from iqssl.augment.masking import make_jepa_masks
+
+        m = make_jepa_masks(32, 64, ratio=0.5, n_targets=4, generator=_g())
+        assert m["context"].sum(-1).unique().numel() == 1
+
+    def test_jepa_invalid_ratio_rejected(self):
+        from iqssl.augment.masking import make_jepa_masks
+
+        with pytest.raises(ValueError, match="ratio"):
+            make_jepa_masks(2, 16, ratio=1.0)
+
     def test_keep_indices_rejects_ragged_masks(self):
         ragged = torch.zeros(2, 8, dtype=torch.bool)
         ragged[0, :3] = True
@@ -340,6 +376,22 @@ class TestPipeline:
         spec = ViewSpec(n_views=1, needs_mask=True, mask_kind="random")
         b = ViewPipeline(spec, "standard", n_tokens=16)(self._batch(x[:8]))
         assert b.masks is not None and b.masks["mask"].shape == (8, 16)
+
+    def test_mask_geometry_comes_from_the_spec(self, signals):
+        # The geometry is part of the objective the method declared; a pipeline
+        # knob overriding it would change a method while claiming to hold it fixed.
+        x, _ = signals
+        spec = ViewSpec(n_views=0, needs_mask=True, mask_kind="random", mask_ratio=0.5)
+        b = ViewPipeline(spec, "none", n_tokens=32)(self._batch(x[:4]))
+        assert b.masks is not None
+        assert int(b.masks["mask"].sum(-1)[0]) == 16
+
+    def test_jepa_spec_yields_context_and_targets(self, signals):
+        x, _ = signals
+        spec = ViewSpec(n_views=0, needs_mask=True, mask_kind="jepa", mask_ratio=0.5)
+        b = ViewPipeline(spec, "none", n_tokens=16)(self._batch(x[:4]))
+        assert b.masks is not None
+        assert set(b.masks) == {"context", "targets"}
 
     def test_masking_without_n_tokens_is_rejected_at_construction(self):
         # Better a loud failure when the pipeline is built than a shape mismatch

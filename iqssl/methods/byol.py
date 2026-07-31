@@ -89,6 +89,10 @@ class BYOL(Method):
     def on_step_end(self, step: int, total_steps: int) -> None:
         self.teacher.update(self.online, step, total_steps)
 
+    def encoder_passes_per_step(self) -> tuple[float, float]:
+        # Symmetrized loss: both views pass through both branches.
+        return 2.0, 2.0
+
     def param_groups(self, base_lr: float, weight_decay: float) -> list[dict[str, Any]]:
         """Predictor at 10x LR, everything else at the base rate.
 

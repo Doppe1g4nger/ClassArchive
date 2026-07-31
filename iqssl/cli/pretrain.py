@@ -118,6 +118,12 @@ def main(cfg: DictConfig) -> float:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out = Path(cfg.output_root) / cfg.experiment / cfg.method.name / f"seed{cfg.train.seed}" / stamp
 
+    # The full resolved config, not just the summary in config.json: evaluation
+    # rebuilds the exact encoder and method from the run directory alone, and
+    # the summary records the method's *name* but not the encoder's arguments.
+    out.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(config=cfg, f=out / "config_full.yaml")
+
     state = train(method, dataset, train_cfg, out_dir=out, method_cfg=cfg)
     log.info("done: final loss %.4f, wrote %s", state.final_loss, out)
     return state.final_loss

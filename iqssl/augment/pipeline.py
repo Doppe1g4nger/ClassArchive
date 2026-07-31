@@ -16,7 +16,7 @@ from __future__ import annotations
 import torch
 from torch import Generator, Tensor
 
-from iqssl.augment.masking import make_mask
+from iqssl.augment.masking import make_jepa_masks, make_mask
 from iqssl.augment.policies import AugmentPolicy, get_policy
 from iqssl.types import Batch, ViewSpec
 
@@ -31,14 +31,10 @@ class ViewPipeline:
         *,
         seed: int = 0,
         device: torch.device | str = "cpu",
-        mask_ratio: float = 0.75,
-        block_size: int = 4,
         n_tokens: int | None = None,
     ) -> None:
         self.spec = spec
         self.policy = get_policy(policy) if isinstance(policy, str) else policy
-        self.mask_ratio = mask_ratio
-        self.block_size = block_size
         self.n_tokens = n_tokens
         self.device = torch.device(device)
         self._g: Generator = torch.Generator(device=self.device)
@@ -51,23 +47,38 @@ class ViewPipeline:
             )
 
     def __call__(self, batch: Batch) -> Batch:
-        """Populate ``batch.views`` and ``batch.masks`` in place. Returns it."""
+        """Populate ``batch.views`` and ``batch.masks`` in place. Returns it.
+
+        Mask geometry (ratio, block size) comes from the *spec*, not from
+        pipeline configuration: it is part of the objective a method declared,
+        and a pipeline-level knob would let an experiment change one method's
+        objective while claiming to hold it fixed.
+        """
         x = batch.x_raw
         batch.views = [self._view(x) for _ in range(self.spec.n_views)]
 
         if self.spec.needs_mask:
             assert self.spec.mask_kind is not None and self.n_tokens is not None
-            batch.masks = {
-                "mask": make_mask(
+            if self.spec.mask_kind == "jepa":
+                batch.masks = make_jepa_masks(
                     x.shape[0],
                     self.n_tokens,
-                    self.spec.mask_kind,
-                    ratio=self.mask_ratio,
-                    block_size=self.block_size,
+                    ratio=self.spec.mask_ratio,
                     generator=self._g,
                     device=x.device,
                 )
-            }
+            else:
+                batch.masks = {
+                    "mask": make_mask(
+                        x.shape[0],
+                        self.n_tokens,
+                        self.spec.mask_kind,
+                        ratio=self.spec.mask_ratio,
+                        block_size=self.spec.mask_block_size,
+                        generator=self._g,
+                        device=x.device,
+                    )
+                }
         return batch
 
     def _view(self, x: Tensor) -> Tensor:

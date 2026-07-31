@@ -17,8 +17,15 @@ interaction rather than comparing one method against another method plus a
 hand-designed prior.
 """
 
-from iqssl.augment.masking import make_mask
+from iqssl.augment.masking import make_jepa_masks, make_mask
 from iqssl.augment.pipeline import ViewPipeline
 from iqssl.augment.policies import POLICIES, AugmentPolicy, get_policy
 
-__all__ = ["POLICIES", "AugmentPolicy", "ViewPipeline", "get_policy", "make_mask"]
+__all__ = [
+    "POLICIES",
+    "AugmentPolicy",
+    "ViewPipeline",
+    "get_policy",
+    "make_jepa_masks",
+    "make_mask",
+]

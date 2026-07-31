@@ -82,6 +82,23 @@ class Method(nn.Module, abc.ABC):
         """
         return default_param_groups(self, base_lr, weight_decay)
 
+    def encoder_passes_per_step(self) -> tuple[float, float]:
+        """``(student_passes, teacher_passes)`` per training step, token-weighted.
+
+        The fairness argument holds epochs constant, but equal epochs is not
+        equal compute: MAE's encoder sees 25% of the tokens, two-view methods do
+        2x the passes, and EMA methods add gradient-free teacher passes. The
+        Pareto plot in the analysis stage is built from these numbers, so a
+        method that misdeclares them is quietly flattering itself.
+
+        The default charges one full-token student pass per view (minimum one)
+        and no teacher. Methods override: MAE reports its keep-fraction, the
+        EMA methods report their teacher passes. Declared rather than measured
+        because the loop must stay method-agnostic — and a declaration sitting
+        next to the forward that spends it is easy to audit.
+        """
+        return float(max(1, type(self).view_spec(self.cfg).n_views)), 0.0
+
     def encoder_for_eval(self) -> nn.Module:
         """Which encoder evaluation should use.
 

@@ -31,7 +31,7 @@ from typing import Literal
 import torch
 from torch import Tensor
 
-MaskKind = Literal["random", "block", "causal"]
+MaskKind = Literal["random", "block", "causal", "jepa"]
 Pool = Literal["cls", "mean"]
 
 
@@ -60,6 +60,16 @@ class ViewSpec:
     """Asymmetric methods (BYOL, SimSiam, JEPA) treat view 0 and view 1
     differently; symmetric ones may swap them freely."""
 
+    mask_ratio: float = 0.75
+    """Fraction of tokens masked (for ``jepa``, the fraction covered by target
+    blocks). Lives here rather than in the pipeline because the geometry is part
+    of the *objective*: MAE at 75% random and data2vec at 50% block are different
+    methods, not different data settings, and a pipeline-level knob would let an
+    experiment change one method's objective while claiming to hold it fixed."""
+
+    mask_block_size: int = 4
+    """Contiguous span, in tokens, for ``block`` and ``jepa`` masks."""
+
     def __post_init__(self) -> None:
         if self.n_views < 0:
             raise ValueError(f"n_views must be >= 0, got {self.n_views}")
@@ -67,6 +77,10 @@ class ViewSpec:
             raise ValueError("needs_mask=True requires an explicit mask_kind")
         if not self.needs_mask and self.mask_kind is not None:
             raise ValueError(f"mask_kind={self.mask_kind!r} set but needs_mask=False")
+        if not 0.0 < self.mask_ratio < 1.0:
+            raise ValueError(f"mask_ratio must be in (0, 1), got {self.mask_ratio}")
+        if self.mask_block_size < 1:
+            raise ValueError(f"mask_block_size must be >= 1, got {self.mask_block_size}")
 
 
 @dataclass

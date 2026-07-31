@@ -208,10 +208,14 @@ def train(
             # student that no longer exists.
             method.on_step_end(state.step, total_steps)
 
-            n_views = max(1, len(batch.views))
-            compute.add_forward(batch.batch_size, n_tokens or batch.seq_len)
-            for _ in range(n_views - 1):
-                compute.add_forward(batch.batch_size, n_tokens or batch.seq_len)
+            # The method declares its own spend (see encoder_passes_per_step);
+            # the loop just books it. Measuring here instead would need the loop
+            # to know which forwards were teacher passes, i.e. to branch.
+            student_passes, teacher_passes = method.encoder_passes_per_step()
+            tokens = n_tokens or batch.seq_len
+            compute.add_forward(batch.batch_size, tokens, weight=student_passes)
+            if teacher_passes > 0:
+                compute.add_forward(batch.batch_size, tokens, teacher=True, weight=teacher_passes)
             compute.add_step(batch.batch_size)
             compute.update_peak_memory()
 

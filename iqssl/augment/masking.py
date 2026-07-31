@@ -104,6 +104,54 @@ def _causal(
     return idx >= split.unsqueeze(-1)
 
 
+def make_jepa_masks(
+    batch: int,
+    n_tokens: int,
+    *,
+    ratio: float = 0.5,
+    n_targets: int = 4,
+    generator: Generator | None = None,
+    device: torch.device | str = "cpu",
+) -> dict[str, Tensor]:
+    """I-JEPA geometry: several contiguous target blocks plus their complement.
+
+    Returns ``{"context": (B, N) bool, "targets": (B, T, N) bool}``. In
+    ``targets``, True marks a position to be predicted, following the global
+    convention. ``context`` deliberately inverts it — True means the token *is*
+    in the context, i.e. visible to the student — because a context mask names
+    membership, and every consumer immediately converts it to keep-indices where
+    the inverted reading would be an off-by-negation waiting to happen.
+
+    Block placement is one block per equal segment of the sequence, jittered
+    uniformly within its segment. This forfeits a little placement freedom
+    compared to fully random starts, and buys the property everything downstream
+    depends on: blocks can never overlap, so every sample has *exactly* the same
+    number of context tokens and ``forward_masked``'s gather stays rectangular.
+    Ragged context sizes would force padding, and a pad token the student can
+    attend to is a context leak.
+    """
+    if not 0.0 < ratio < 1.0:
+        raise ValueError(f"jepa target ratio must be in (0, 1), got {ratio}")
+    if n_targets < 1 or n_targets > n_tokens:
+        raise ValueError(f"n_targets must be in [1, {n_tokens}], got {n_targets}")
+
+    segment = n_tokens // n_targets
+    block_len = max(1, min(segment, round(ratio * n_tokens / n_targets)))
+
+    idx = torch.arange(n_tokens, device=device).view(1, 1, -1)
+    jitter = torch.stack(
+        [
+            torch.randint(0, segment - block_len + 1, (batch,), generator=generator, device=device)
+            for _ in range(n_targets)
+        ],
+        dim=1,
+    )  # (B, T)
+    starts = jitter + torch.arange(n_targets, device=device).view(1, -1) * segment
+    targets = (idx >= starts.unsqueeze(-1)) & (idx < (starts + block_len).unsqueeze(-1))
+
+    return {"context": ~targets.any(dim=1), "targets": targets}
+
+
 def keep_indices(mask: Tensor) -> tuple[Tensor, Tensor]:
     """``(keep_idx, ids_restore)`` for MAE's gather/scatter path.
 
