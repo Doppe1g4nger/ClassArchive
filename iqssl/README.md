@@ -99,6 +99,31 @@ the one the run was pretrained on.
 **What does not run yet:** `iqssl-aggregate` (stage 9) and the equal-budget HPO
 sweeper (stage 8). Method rankings from single unswept runs are not results.
 
+### What the smoke scale can and cannot show
+
+All twelve methods pretrain and four (SimCLR, MAE, `supervised`, `random`) were
+evaluated end to end on the `smoke` preset. The protocol demonstrably resolves
+signal — the **modulation** probe reads ≈0.30 against a 0.10 chance line, for
+*random features* — but the **emitter** probe sits at chance (≈0.12, chance
+0.125) for every method, `supervised` included.
+
+That is a property of the preset, not a defect, and it was worth pinning down
+rather than assuming. `Supervised` memorizes 64 buffers to 100% accuracy in 60
+steps, so the objective and its gradient path are sound; it simply cannot
+*generalize* 8-way emitter identity from 2,861 training buffers with a ViT,
+which is data-starved at that size. The difficulty gate's purpose-built CNN
+reached only 0.31 on the same preset.
+
+**So do not read a ceiling-above-floor ordering off smoke runs — there isn't
+one, and there shouldn't be.** That ordering is a property to check on `easy`
+or larger, where the gate already measured a CNN at 0.891. Smoke exists to
+exercise the plumbing in CI, and it does that well.
+
+One cost worth knowing before a full sweep: the protocol finetunes at three
+label fractions on both label axes, so six full finetunes per run — 72 across a
+twelve-method sweep, which can exceed the pretraining it evaluates. Reporting
+both axes is deliberate, but budget for it.
+
 ### A note on the gitignore incident
 
 `iqssl/data/` was absent from the first four commits on this branch. `.gitignore`

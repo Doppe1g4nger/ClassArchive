@@ -354,3 +354,65 @@ class TestTinyOverfit:
         std_min = next(v for k, v in final.items() if k.endswith("std_min"))
         assert rankme > tol.MIN_RANKME, f"{name} collapsed: rankme {rankme:.2f}"
         assert std_min > tol.MIN_FEATURE_STD, f"{name} collapsed: std_min {std_min:.2e}"
+
+
+@pytest.mark.slow
+class TestFixedBatchOverfit:
+    """Can each method drive its objective down on **one fixed batch**?
+
+    This is the check that distinguishes "the gradients reach the encoder" from
+    "the loss happens to drift". ``TestTinyOverfit`` above trains on the whole
+    dataset for 60 steps, which conflates optimization with generalization: a
+    method whose loss stays flat there might be broken, or might simply face a
+    task it cannot generalize in 60 steps. Both look identical.
+
+    Repeating a single batch removes generalization from the question entirely.
+    A correctly wired objective must be able to memorize its way down; one that
+    cannot has a detached tensor, a frozen parameter, or a target that does not
+    depend on its input. This test was added after a supervised run sat at
+    exactly ln(n_classes) for 600 steps and the existing suite could not say
+    whether the method or the dataset was at fault -- a direct fixed-batch probe
+    answered it in seconds (it memorized 64 samples perfectly, exonerating the
+    method).
+    """
+
+    @pytest.mark.parametrize("name", sorted(METHODS.keys()))
+    def test_objective_falls_on_a_repeated_batch(self, name, dataset):
+        from iqssl.augment.pipeline import ViewPipeline
+
+        method_cls = METHODS.get(name)
+        if not getattr(method_cls, "trainable", True):
+            pytest.skip("deliberately non-trainable (the random floor)")
+
+        method = _method(name, dataset, seed=0)
+        spec = method_cls.view_spec()
+
+        # Built once, then reused verbatim: fresh augmentation or fresh masks
+        # every step would make the batch un-memorizable and put us back to
+        # measuring generalization.
+        batch = ViewPipeline(
+            spec,
+            "none",
+            seed=0,
+            n_tokens=getattr(method.encoder, "num_patches", None),
+        )(next(iter(build_loader(dataset, method_cls, _cfg(batch_size=32)))))
+
+        opt = torch.optim.AdamW(method.parameters(), lr=1e-3)
+        losses = []
+        method.train()
+        for step in range(60):
+            opt.zero_grad(set_to_none=True)
+            out = method(batch, step, 60)
+            out.loss.backward()
+            opt.step()
+            method.on_step_end(step, 60)
+            losses.append(float(out.loss.detach()))
+
+        early, late = float(np.mean(losses[:5])), float(np.mean(losses[-5:]))
+        assert late < early * 0.9, (
+            f"{name} could not reduce its own objective on a single repeated "
+            f"batch (first-5 mean {early:.4f}, last-5 mean {late:.4f}). "
+            f"Generalization is not the question here -- this points at the "
+            f"gradient path: a detached target, a frozen parameter, or a "
+            f"prediction that does not depend on the input."
+        )
