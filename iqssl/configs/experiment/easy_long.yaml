@@ -1,0 +1,25 @@
+# @package _global_
+# The viability gate: is the headline task learnable at all by the control
+# encoder, at a scale where the difficulty gate already showed a small CNN
+# reaching 0.891?
+#
+# At smoke scale every method probes at chance on emitter identity, including
+# the supervised ceiling -- diagnosed as a data-starved ViT (it memorizes 64
+# buffers perfectly but cannot generalize from 2,861). This experiment answers
+# the question that governs whether a 324-run sweep is worth building toward.
+# Long enough to matter, short enough to finish on CPU.
+experiment: easy_long
+data:
+  root: data/easy
+train:
+  epochs: 6
+  batch_size: 128
+  max_steps: 3000
+  device: cpu
+  log_every: 200
+  probe_every: 0
+  # `light` is phase + small timing only, measured to cost the emitter
+  # fingerprint nothing (d = 13.4 unaugmented, 13.4 under light). The gate asks
+  # whether the encoder *can* learn the task; augmentation strength is a
+  # separate question and would confound this one.
+  augment: light

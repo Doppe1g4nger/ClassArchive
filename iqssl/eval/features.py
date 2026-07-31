@@ -49,16 +49,26 @@ class SplitFeatures:
 
 
 @torch.no_grad()
-def extract(encoder: nn.Module, dataset: IQDataset, device: str = "cpu") -> SplitFeatures:
+def extract(
+    encoder: nn.Module, dataset: IQDataset, device: str = "cpu", limit: int | None = None
+) -> SplitFeatures:
+    """Frozen features for a split, optionally over its first ``limit`` rows.
+
+    Truncation rather than sampling: a split's row order is already a fixed,
+    seed-derived permutation, so a prefix is an unbiased subset that needs no
+    RNG of its own and is identical across every caller. Hyperparameter search
+    uses it to keep per-trial cost bounded; the reported protocol never does.
+    """
     dev = torch.device(device)
     encoder = encoder.to(dev).eval()
 
+    n = len(dataset) if limit is None else min(limit, len(dataset))
     feats: list[Tensor] = []
     y_em: list[int] = []
     y_mod: list[int] = []
     nz: list[np.ndarray] = []
-    for start in range(0, len(dataset), EXTRACT_BATCH):
-        items = [dataset[i] for i in range(start, min(start + EXTRACT_BATCH, len(dataset)))]
+    for start in range(0, n, EXTRACT_BATCH):
+        items = [dataset[i] for i in range(start, min(start + EXTRACT_BATCH, n))]
         x = torch.stack([it["x"] for it in items]).to(dev)
         feats.append(encoder(x).pooled(POOL).cpu())
         y_em += [it["y_emitter"] for it in items]
@@ -70,5 +80,5 @@ def extract(encoder: nn.Module, dataset: IQDataset, device: str = "cpu") -> Spli
         y_emitter=np.asarray(y_em, dtype=np.int64),
         y_mod=np.asarray(y_mod, dtype=np.int64),
         nuisance=np.stack(nz),
-        snr=dataset.snr.copy(),
+        snr=dataset.snr[:n].copy(),
     )

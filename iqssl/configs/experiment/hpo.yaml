@@ -1,0 +1,13 @@
+# @package _global_
+# The shared short schedule every tuning trial runs. Held identical across
+# methods -- it is the budget, not a per-method choice.
+experiment: hpo
+val_probe: true   # main() must return a probe score for the sweeper to maximize
+train:
+  epochs: 3
+  batch_size: 128
+  max_steps: 400
+  device: cpu
+  log_every: 100
+  probe_every: 0
+  augment: standard

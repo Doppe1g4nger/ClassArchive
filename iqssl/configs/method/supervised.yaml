@@ -6,3 +6,11 @@ train:
   optimizer: adamw
   base_lr: 1.0e-3
   weight_decay: 0.05
+
+# Tuning space for the equal-budget sweep. Keys must be METHOD_TUNABLE
+# (base_lr, weight_decay) or this method's own constructor arguments;
+# check_search_space refuses anything else. Optimizer *family* is absent
+# deliberately -- it is a published default, not a tuned knob.
+search:
+  train.base_lr: "tag(log, interval(1e-4, 1e-2))"
+  train.weight_decay: "tag(log, interval(1e-3, 0.3))"

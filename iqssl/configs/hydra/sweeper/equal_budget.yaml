@@ -1,0 +1,31 @@
+# The equal tuning budget, pinned.
+#
+# The fairness contract promises "9 trials per method, then 3 seeds at the
+# winner". That promise is only worth anything if it is enforced: a method
+# quietly given 30 trials beats one given 9 for reasons that have nothing to do
+# with its objective, and the resulting table would look entirely normal.
+# METHOD_TUNABLE already makes the "what may vary" half executable; this is the
+# other half. iqssl/cli/pretrain.py::check_sweep_budget refuses a sweep whose
+# trial count differs from N_TRIALS.
+_target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+
+# Maximize the validation probe accuracy that main() returns. NOT the
+# pretraining loss -- BYOL and SimSiam reach near-zero loss exactly when they
+# collapse, so minimizing loss would select the collapsed configuration.
+direction: maximize
+study_name: iqssl
+storage: null
+n_trials: 9
+n_jobs: 1
+
+sampler:
+  _target_: optuna.samplers.TPESampler
+  # Seeded so a sweep is reproducible: the same nine configurations get tried
+  # for every method, which is a stronger guarantee than merely equal counts.
+  seed: 0
+  n_startup_trials: 3
+
+# Per-method spaces live in configs/method/<name>.yaml under `search:` and are
+# passed on the command line by the sweep driver; nothing method-specific
+# belongs in this shared file.
+params: {}

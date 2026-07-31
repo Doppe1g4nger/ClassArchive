@@ -6,3 +6,6 @@ train:
   optimizer: adamw
   base_lr: 1.0e-3
   weight_decay: 0.0
+
+# No search space: the floor is an untrained encoder, so there is nothing to
+# tune. A sweep over it would spend nine trials measuring nothing nine times.

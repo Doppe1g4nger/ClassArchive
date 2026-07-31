@@ -8,3 +8,12 @@ train:
   optimizer: lars
   base_lr: 0.3
   weight_decay: 1.0e-6
+
+# Tuning space for the equal-budget sweep. Keys must be METHOD_TUNABLE
+# (base_lr, weight_decay) or this method's own constructor arguments;
+# check_search_space refuses anything else. Optimizer *family* is absent
+# deliberately -- it is a published default, not a tuned knob.
+search:
+  train.base_lr: "tag(log, interval(0.05, 1.0))"
+  train.weight_decay: "tag(log, interval(1e-7, 1e-4))"
+  method.args.temperature: "interval(0.05, 0.5)"

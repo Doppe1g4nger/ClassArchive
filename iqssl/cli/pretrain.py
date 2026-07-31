@@ -24,9 +24,10 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from iqssl.data.dataset import IQDataset
+from iqssl.eval.quick import format_scores, is_collapsed, objective_from, val_probe_score
 from iqssl.registry import ENCODERS, METHODS, autodiscover
 from iqssl.train.loop import TrainConfig, train
-from iqssl.utils.logging_ import get_logger, setup_console_logging
+from iqssl.utils.logging_ import get_logger, setup_console_logging, write_json
 from iqssl.utils.seed import seed_everything
 
 log = get_logger(__name__)
@@ -75,6 +76,63 @@ def merge_train_config(cfg: DictConfig) -> TrainConfig:
             f"set {sorted(METHOD_TUNABLE)}; everything else belongs to the experiment."
         )
     return TrainConfig(**{**base, **overrides})
+
+
+N_TRIALS = 9
+"""The equal tuning budget, per the fairness contract.
+
+Nine trials for every method, then three seeds at the winner. Enforced rather
+than documented for the same reason METHOD_TUNABLE is: a method quietly given
+thirty trials beats one given nine for reasons that have nothing to do with its
+objective, and the resulting table looks entirely normal.
+"""
+
+
+def check_sweep_budget(n_trials: int) -> None:
+    """Refuse a sweep whose trial count differs from the contracted budget."""
+    if n_trials != N_TRIALS:
+        raise ValueError(
+            f"sweep requests {n_trials} trials but the fairness contract fixes the "
+            f"budget at {N_TRIALS} per method. Equal budgets are what make 'we tuned "
+            f"them fairly' a fact rather than a claim; change N_TRIALS if the budget "
+            f"itself should change, which changes it for every method at once."
+        )
+
+
+def check_search_space(cfg: DictConfig) -> dict[str, str]:
+    """Validate a method's ``search:`` block and return it.
+
+    Every key must be a permitted training knob or one of *this* method's own
+    constructor arguments. Without the check, a search space could reach for
+    ``train.epochs`` and buy one method a longer schedule under the guise of
+    tuning -- the same hole ``merge_train_config`` closes for static config.
+    """
+    space = _as_dict(cfg.method.get("search", {}))
+    method_cls = METHODS.get(cfg.method.name)
+    own_args = set(inspect.signature(method_cls.__init__).parameters)
+
+    for key in space:
+        if key.startswith("train."):
+            knob = key.split(".", 1)[1]
+            if knob not in METHOD_TUNABLE:
+                raise ValueError(
+                    f"search space for {cfg.method.name!r} tunes {key!r}, which the "
+                    f"fairness contract holds constant. Tunable: "
+                    f"{sorted('train.' + k for k in METHOD_TUNABLE)}."
+                )
+        elif key.startswith("method.args."):
+            arg = key.split(".", 2)[2]
+            if arg not in own_args:
+                raise ValueError(
+                    f"search space for {cfg.method.name!r} tunes {key!r}, which is not "
+                    f"an argument of {method_cls.__name__}.__init__."
+                )
+        else:
+            raise ValueError(
+                f"search key {key!r} must start with 'train.' or 'method.args.'; "
+                "anything else is outside what a method is allowed to vary."
+            )
+    return space
 
 
 def build_method(cfg: DictConfig, seq_len: int, seed: int = 0, n_classes: int | None = None) -> Any:
@@ -151,7 +209,29 @@ def main(cfg: DictConfig) -> float:
 
     state = train(method, dataset, train_cfg, out_dir=out, method_cfg=cfg)
     log.info("done: final loss %.4f, wrote %s", state.final_loss, out)
-    return state.final_loss
+
+    # What this function *returns* is what Hydra's Optuna sweeper optimizes, so
+    # it must be a measure of the representation and not of the objective value.
+    # Returning the pretraining loss would be worse than uninformative: BYOL and
+    # SimSiam reach near-zero loss precisely when they collapse, so a sweep would
+    # select the collapsed configuration every time. Off by default because a
+    # single run does not need it and the probe is not free.
+    if not cfg.get("val_probe", False):
+        return state.final_loss
+
+    scores = val_probe_score(
+        method.encoder_for_eval(),
+        cfg.data.root,
+        split_variant=cfg.data.split_variant,
+        primary_label=cfg.data.primary_label,
+        device=train_cfg.device,
+        crop_len=cfg.data.crop_len,
+    )
+    if is_collapsed(scores):
+        log.warning("collapse suspected -- %s", format_scores(scores))
+    log.info("val probe: %s", format_scores(scores))
+    write_json(out / "val_probe.json", scores)
+    return objective_from(scores)
 
 
 if __name__ == "__main__":
