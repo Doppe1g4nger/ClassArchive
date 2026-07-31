@@ -86,8 +86,8 @@ untested at the end.
 | 5. View methods | **done** | SimCLR, SupCon, Barlow Twins, VICReg, BYOL, SimSiam |
 | 6. Masked / latent methods + references | **done** | MAE; I-JEPA/TS-JEPA/data2vec as a shared-machinery 3-axis ablation; `supervised` ceiling, `random` floor |
 | 7. Full eval protocol | **done** | `iqssl-evaluate`: linear probe + kNN + finetune at 1%/10%/100%, nuisance R², SNR quartiles |
-| 8. Configs + equal-budget HPO | **partial** | Hydra tree and per-method configs exist; no HPO sweeper yet |
-| 9. Analysis and aggregation | not started | `iqssl-aggregate` unregistered until it exists |
+| 8. Configs + equal-budget HPO | **done** | `iqssl-sweep`: 9 trials per method, selected on a **validation** probe, budget and search space both enforced |
+| 9. Analysis and aggregation | **done** | `iqssl-aggregate`: fairness-invariant pooling refusal, seed error bars, compute-vs-accuracy Pareto |
 
 **What runs today:** the full train-and-measure path. All twelve registered
 methods pretrain through the one shared loop, and `iqssl-evaluate` scores any
@@ -96,8 +96,46 @@ nuisance-regression probe, and accuracy by SNR quartile — writing `eval.json`
 next to the checkpoint. Evaluation refuses a dataset whose hash differs from
 the one the run was pretrained on.
 
-**What does not run yet:** `iqssl-aggregate` (stage 9) and the equal-budget HPO
-sweeper (stage 8). Method rankings from single unswept runs are not results.
+**What does not run yet:** nothing in the pipeline. Every stage has an
+implementation and a gate. What is missing is *results* — no sweep has been run
+at a scale where the numbers mean anything, and the sections below say exactly
+what has and has not been demonstrated.
+
+### Tuning selects on validation, never on test
+
+`iqssl-sweep --method simclr` runs the contracted nine trials. Two things about
+it are worth knowing before trusting any tuned number:
+
+**The objective is a validation probe, not the pretraining loss.** Hydra's
+Optuna sweeper optimizes whatever `main()` returns, and returning the loss would
+be worse than useless — BYOL and SimSiam reach near-zero loss precisely when
+they collapse, so the sweep would reliably select the collapsed configuration
+for exactly the methods designed to avoid it. `experiment=hpo` sets
+`val_probe: true`, and the driver refuses to sweep an experiment that does not.
+
+**Selection never opens the test split.** Nine trials across twelve methods
+tuned against test would leak it into every headline number, invisibly.
+`tests/test_hpo.py` asserts the omission by recording which splits get opened,
+rather than trusting the source to keep saying "val".
+
+The budget and the search spaces are enforced, not documented: `N_TRIALS = 9`
+for every method, and a `search:` block may only reach for `base_lr`,
+`weight_decay` or that method's own constructor arguments — the same hole
+`merge_train_config` closes for static config, which a search space could
+otherwise walk through by tuning `train.epochs`.
+
+### Aggregation refuses to pool incomparable runs
+
+`iqssl-aggregate --root <dir> --out <dir>` produces the tables and figures. Its
+most important behaviour is a refusal: runs disagreeing on dataset hash,
+encoder, epochs, batch size, warmup, grad clip, augmentation policy, crop length
+or split variant are **not** averaged. That failure is silent by construction —
+a table pooled across two dataset versions reads exactly like a correct one —
+so `--allow-incomparable` stamps the written report, and such a table says on
+its face that it is not a result.
+
+Single-seed cells report no spread rather than zero, for the same reason: a zero
+error bar is a reproducibility claim nobody measured.
 
 ### What the smoke scale can and cannot show
 
@@ -213,17 +251,26 @@ iqssl-difficulty-report --data data/smoke --no-gate   # the gate; see calibratio
 iqssl-pretrain experiment=smoke_cpu method=simclr     # ~20 steps on CPU
 iqssl-evaluate --run outputs/smoke_cpu/simclr/seed0/<timestamp>
 
-# Not implemented yet -- see Implementation status above.
-# iqssl-aggregate root=outputs/smoke_cpu
+iqssl-aggregate --root outputs/smoke_cpu --out results/smoke
 ```
 
 Sweep across methods and seeds (`-m` is Hydra's multirun):
 
 ```bash
+# 1. tune each method on its own equal budget (nine trials, selected on val)
+for m in simclr supcon barlow vicreg byol simsiam mae ijepa tsjepa data2vec supervised; do
+  iqssl-sweep --method $m --experiment hpo
+done
+
+# 2. three seeds at each winner, then evaluate and aggregate
 iqssl-pretrain -m experiment=main_comparison \
   method=simclr,supcon,barlow,vicreg,byol,simsiam,mae,ijepa,tsjepa,data2vec,supervised,random \
   seed=0,1,2
+iqssl-aggregate --root outputs/main_comparison --out results/main
 ```
+
+`random` is absent from the tuning loop deliberately: an untrained encoder has
+no hyperparameters, and nine trials would measure nothing nine times.
 
 ## Layout
 
