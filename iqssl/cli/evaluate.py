@@ -62,15 +62,21 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\nEvaluation -- {report['method']} ({report['run']})")
     print(f"  dataset  {report['dataset_hash']}")
+    if not report["finetune_included"]:
+        print("  finetune: SKIPPED -- this is not the full protocol")
     for axis, res in report["axes"].items():
         print(f"\n  [{axis}]")
         print(f"  {'fraction':>10} {'linear':>8} {'knn':>8} {'finetune':>9}")
         for frac in report["label_fractions"]:
             key = f"{frac:g}"
+            # A skipped finetune leaves no entry at all. Formatting the absence
+            # needs its own branch: `format(None, '.3f')` raises, so the printer
+            # crashed *after* eval.json had been written -- a command that had
+            # already done its work exiting nonzero.
             ft = res["finetune"].get(key)
+            shown = "--" if ft is None else f"{ft:.3f}"
             print(
-                f"  {key:>10} {res['linear_probe'][key]:>8.3f} {res['knn'][key]:>8.3f} "
-                f"{ft if ft is None else format(ft, '.3f'):>9}"
+                f"  {key:>10} {res['linear_probe'][key]:>8.3f} {res['knn'][key]:>8.3f} {shown:>9}"
             )
     print("\n  nuisance R^2 (near 0 = discarded, near 1 = retained):")
     for field, r2 in report["nuisance_r2"].items():

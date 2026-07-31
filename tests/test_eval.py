@@ -211,3 +211,35 @@ class TestProtocol:
 
         with pytest.raises(FileNotFoundError, match="full-config snapshot"):
             load_run_config(tmp_path)
+
+
+class TestEvaluateCLI:
+    """The summary printer, which no test covered until it crashed.
+
+    `evaluate_run` was well tested; `main()` was not, and the gap was exactly
+    the seam between them. The printer ran *after* eval.json was written, so the
+    failure mode was a command that had already done its work correctly and then
+    exited nonzero — the sort of thing a scripted sweep reports as a failure
+    while the artifacts on disk are perfectly fine.
+    """
+
+    def test_summary_prints_when_finetune_is_skipped(self, pretrained_run, capsys):
+        from iqssl.cli.evaluate import main
+
+        run_dir, root = pretrained_run
+        assert main(["--run", str(run_dir), "--data", str(root), "--skip-finetune"]) == 0
+
+        out = capsys.readouterr().out
+        assert "SKIPPED" in out, "a report without finetune must say so on its face"
+        assert "--" in out
+        assert "nuisance R^2" in out
+
+    def test_summary_prints_with_the_full_protocol(self, pretrained_run, capsys):
+        from iqssl.cli.evaluate import main
+
+        run_dir, root = pretrained_run
+        assert main(["--run", str(run_dir), "--data", str(root)]) == 0
+
+        out = capsys.readouterr().out
+        assert "SKIPPED" not in out
+        assert "finetune" in out
