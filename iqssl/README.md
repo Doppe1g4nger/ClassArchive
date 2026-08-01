@@ -223,28 +223,43 @@ being driven *onto* the uniform-output solution — which is the loss-minimizing
 answer when the label is not recoverable from what reaches the classifier.
 
 So the question is no longer the schedule; it is whether the signal survives the
-encoder. Two candidates, both under test:
+encoder. Two candidates were put up, and two 1,200-step arms settled it — each
+changing exactly one thing against the `base_lr` 2e-4 trace above:
 
-* **The augmentation.** `easy_long`'s header claims augmentation would confound
-  the can-it-learn question, then sets `augment: light` — and `Supervised`
-  requests one *augmented* view, so every sample gets a uniform global phase
-  rotation at p=1.0. The difficulty gate's 0.891 oracle saw raw stored buffers.
-  The `d = 13.3` measurement that certified `light` as free was taken on the
-  classical features, several of which (circularity, envelope statistics) are
-  phase-invariant by construction, so it does not transfer to a raw-IQ ViT.
-* **The encoder.** The fingerprint is second-order — IQ imbalance lives in
-  `E[z²]`, PA compression in envelope variance, phase noise in `dphi` variance.
-  `SmallCNN` reaches 0.891 with a full-resolution conv stem and mean+std
-  pooling, and its own docstring records that mean-only pooling capped it at
-  0.77, because "an average cannot represent a second moment". `vit1d` applies a
-  *linear* projection to each 16-sample patch and then pools with a CLS token.
+```
+arm                          train_acc 0 -> 1100      loss           steps/s
+vit1d_tiny, augment=none     0.086 -> 0.059  flat     2.76 -> 2.773    1.81
+cnn1d_tiny, augment=light    0.055 -> 0.228  rising   2.78 -> 2.113    5.72
+```
+
+**It is the encoder, not the augmentation.** Removing augmentation entirely
+changes nothing — the no-augmentation arm reproduces the collapse signature
+exactly (`enc_std_mean` 0.31 → 0.075, `enc_rankme` 49 → 35). Swapping the
+encoder and keeping the augmentation learns immediately, and was still climbing
+when the budget ended.
+
+The mechanism is the one the difficulty gate already wrote down. The fingerprint
+is second-order — IQ imbalance lives in `E[z²]`, PA compression in envelope
+variance, phase noise in `dphi` variance — and `SmallCNN`'s docstring records
+that mean-only pooling capped it at 0.77 against 0.891 with mean+std, because
+"an average cannot represent a second moment". `vit1d` applies a *linear*
+projection to each 16-sample patch and then pools with a CLS token.
+
+**And `cnn1d_tiny` is 3.2x faster, not 5.8x slower.** That figure, quoted here
+and in `easy_long.yaml` as a reason to stay with the ViT, compared vit1d_tiny
+against cnn1d **r18** and reported the result as a fact about "the CNN". Like
+for like it is 5.72 steps/s against 1.81. It is the third measurement in this
+project to be wrong by comparing across configurations — after the contended-vs-
+idle timing and the 1.9x that preceded it — and the only one that pointed the
+work away from the answer.
 
 **Do not read a method ranking off this preset yet, and do not launch the full
-sweep until a ceiling clears its floor here.** If the encoder is the answer, the
-control variable becomes `cnn1d` at ~5.8x the cost per step (measured: 0.185
-steps/s against the ViT's 1.08, because the ViT's stride-16 patch embedding
-discards 15/16 of the sequence before any attention runs, while the CNN stem
-processes it at full resolution).
+sweep until a ceiling clears its floor here.** The remaining question is *which*
+encoder, and it is not simply "use cnn1d": `ResNet1D.forward_masked` raises
+`NotImplementedError`, so adopting it as the control variable would drop MAE,
+data2vec, I-JEPA and TS-JEPA — a third of the benchmark. A finer ViT patch would
+fix the expressiveness problem while keeping the token grid those four need, and
+that is what is under test now.
 
 ### A note on the gitignore incident
 

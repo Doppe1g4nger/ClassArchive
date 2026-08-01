@@ -15,13 +15,14 @@
 #     competing for the same four cores. Idle, the same config runs at 1.08 --
 #     3.1x faster. Never size a budget from a contended timing.
 #   * cnn1d was briefly adopted here on the theory that a convolutional encoder
-#     avoids attention's quadratic cost. Measured, it is ~5.8x *slower* (0.185
-#     steps/s against 1.08, both uncontended): the ViT's stride-16 patch
-#     embedding discards 15/16 of the sequence before any attention runs, while
-#     the CNN stem processes it at full resolution. The first version of this
-#     comment said 1.9x, which came from comparing a *contended* ViT timing
-#     against an uncontended CNN one -- the same mistake as the bullet above,
-#     made a second time while writing up the bullet above.
+#     avoids attention's quadratic cost, then dropped again on a measurement
+#     that said it was slower. Both the 1.9x and the 5.8x figures that comment
+#     carried were wrong, and the mistake is the same one twice: 1.9x compared a
+#     *contended* ViT timing against an uncontended CNN one, and 5.8x compared
+#     vit1d_tiny against cnn1d **r18** -- a far larger model -- and then reported
+#     it as a fact about "the CNN". Like for like, cnn1d_tiny runs at 5.72
+#     steps/s against vit1d_tiny's 1.81: 3.2x *faster*, not slower. The size
+#     name is part of the measurement.
 #
 # 5,600 steps x 128 = 717k samples, matching the sample budget that took the
 # difficulty gate's SmallCNN to 0.891 on this data (12k buffers x 60 epochs).
