@@ -8,6 +8,8 @@ they are asserted before the compute is spent.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from omegaconf import OmegaConf
 
@@ -154,3 +156,77 @@ class TestSweepDriver:
 
         with pytest.raises(ValueError, match="nothing to sweep"):
             build_command("random", "hpo", N_TRIALS, [])
+
+
+class TestOverridePrecedence:
+    """A method's `train:` block is a default, not a final say.
+
+    This is the bug that would have made the entire HPO stage a no-op. The
+    search spaces tune `train.base_lr`; the sweeper delivers proposals as
+    command-line overrides; the method block was applied unconditionally on top.
+    All nine trials would have run the method's static learning rate and the
+    sweep would have named a winner that differed only by seed noise -- with the
+    budget check, the search-space validation and the val-probe objective all
+    reporting success. Nothing downstream could have detected it.
+    """
+
+    def _cfg(self, cli_base_lr: float):
+        return OmegaConf.create(
+            {
+                "train": {"epochs": 10, "optimizer": "adamw", "base_lr": cli_base_lr},
+                "method": {"name": "simclr", "train": {"optimizer": "lars", "base_lr": 0.3}},
+            }
+        )
+
+    def test_command_line_beats_the_method_default(self):
+        from iqssl.cli.pretrain import merge_train_config
+
+        merged = merge_train_config(self._cfg(2e-4), cli_overrides={"base_lr"})
+        assert merged.base_lr == 2e-4, "the sweeper's proposal must reach the loop"
+        # Untouched keys still take the method's published default.
+        assert merged.optimizer == "lars"
+
+    def test_method_default_applies_when_nothing_was_overridden(self):
+        from iqssl.cli.pretrain import merge_train_config
+
+        merged = merge_train_config(self._cfg(1e-3), cli_overrides=set())
+        assert merged.base_lr == 0.3
+        assert merged.optimizer == "lars"
+
+    def test_experiment_settings_are_untouched_either_way(self):
+        from iqssl.cli.pretrain import merge_train_config
+
+        for overrides in (set(), {"base_lr"}):
+            assert merge_train_config(self._cfg(2e-4), cli_overrides=overrides).epochs == 10
+
+    def test_override_keys_are_parsed_from_hydra_task_overrides(self, monkeypatch):
+        """Covers the real path: what the sweeper actually hands Hydra."""
+        import iqssl.cli.pretrain as mod
+
+        class _Overrides:
+            task: ClassVar[list[str]] = [
+                "method=simclr",
+                "train.base_lr=0.05",
+                "+train.weight_decay=1e-6",
+                "seed=1",
+            ]
+
+        class _Cfg:
+            overrides = _Overrides()
+
+        class _HydraConfig:
+            @staticmethod
+            def get():
+                return _Cfg()
+
+        monkeypatch.setitem(
+            __import__("sys").modules,
+            "hydra.core.hydra_config",
+            type("m", (), {"HydraConfig": _HydraConfig}),
+        )
+        assert mod.cli_overridden_train_keys() == {"base_lr", "weight_decay"}
+
+    def test_no_hydra_context_means_nothing_was_overridden(self):
+        from iqssl.cli.pretrain import cli_overridden_train_keys
+
+        assert cli_overridden_train_keys() == set()

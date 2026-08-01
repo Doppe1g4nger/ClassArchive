@@ -63,19 +63,69 @@ def _as_dict(node: Any) -> dict[str, Any]:
     return cast(dict[str, Any], OmegaConf.to_container(node, resolve=True) or {})
 
 
-def merge_train_config(cfg: DictConfig) -> TrainConfig:
-    """Fold a method's permitted overrides into the experiment's training config."""
-    base = _as_dict(cfg.train)
-    overrides = _as_dict(cfg.method.get("train", {}))
+def cli_overridden_train_keys() -> set[str]:
+    """Which ``train.*`` keys the caller set on the command line.
 
-    illegal = set(overrides) - METHOD_TUNABLE
+    Hydra records its task overrides, and the sweeper supplies its sampled
+    hyperparameters the same way, so this covers both a human typing
+    ``train.base_lr=2e-4`` and Optuna proposing one.
+    """
+    try:
+        from hydra.core.hydra_config import HydraConfig
+
+        task = HydraConfig.get().overrides.task
+    except Exception:
+        # Called outside a Hydra run (tests, notebooks): nothing was overridden.
+        return set()
+
+    keys = set()
+    for item in task:
+        stripped = str(item).lstrip("+~")
+        if "=" in stripped:
+            key = stripped.split("=", 1)[0]
+            if key.startswith("train."):
+                keys.add(key.split(".", 1)[1])
+    return keys
+
+
+def merge_train_config(cfg: DictConfig, cli_overrides: set[str] | None = None) -> TrainConfig:
+    """Fold a method's permitted defaults into the experiment's training config.
+
+    Precedence is root < method < experiment < command line, and the last term
+    is the one this function exists to get right. A method's ``train:`` block is
+    a *default* -- the published optimizer and learning rate it was designed
+    with -- not a final say.
+
+    Applying the method block unconditionally on top, as this did originally,
+    silently discarded command-line overrides. That was not merely inconvenient:
+    the HPO search spaces tune ``train.base_lr``, and the sweeper delivers its
+    proposals as command-line overrides, so every one of the nine trials ran the
+    method's static learning rate. The sweep would have reported a winner that
+    differed from the others only by seed noise, while the budget check, the
+    search-space validation and the val-probe objective all passed.
+    """
+    base = _as_dict(cfg.train)
+    method_defaults = _as_dict(cfg.method.get("train", {}))
+
+    illegal = set(method_defaults) - METHOD_TUNABLE
     if illegal:
         raise ValueError(
             f"method config {cfg.method.name!r} tries to set {sorted(illegal)}, which "
             f"the fairness contract holds constant across methods. A method may only "
             f"set {sorted(METHOD_TUNABLE)}; everything else belongs to the experiment."
         )
-    return TrainConfig(**{**base, **overrides})
+
+    explicit = cli_overridden_train_keys() if cli_overrides is None else cli_overrides
+    applied = {k: v for k, v in method_defaults.items() if k not in explicit}
+    for k in sorted(set(method_defaults) & explicit):
+        log.info(
+            "train.%s=%r from the command line overrides the %s default (%r)",
+            k,
+            base.get(k),
+            cfg.method.name,
+            method_defaults[k],
+        )
+    return TrainConfig(**{**base, **applied})
 
 
 N_TRIALS = 9
