@@ -4,3 +4,22 @@ name: vit1d
 args:
   size: tiny
   patch_size: 16
+  # Not the ViT default, and changed on evidence rather than preference. With
+  # the textbook linear patch embedding this encoder cannot learn the benchmark's
+  # own headline task: at 1,200 steps on `easy` it sits at 1/16 chance while
+  # shedding effective rank, at every learning rate across a 20x span, with and
+  # without augmentation, and at patch 16, 8 and 4 alike. The fingerprint is
+  # second-order and a linear map of raw samples cannot form a second moment.
+  #
+  #   encoder                       train_acc @1,200 steps      steps/s
+  #   vit1d_tiny linear, patch 16   0.061  flat                    1.81
+  #   vit1d_tiny linear, patch  8   0.064  flat                    0.80
+  #   vit1d_tiny linear, patch  4   0.059  flat                    0.36
+  #   vit1d_tiny conv,   patch 16   0.177  rising                  1.10
+  #   cnn1d_tiny                    0.228  rising                  5.72
+  #
+  # cnn1d_tiny is both faster and better here, and is still not the answer:
+  # ResNet1D.forward_masked raises NotImplementedError, so adopting it would drop
+  # MAE, data2vec, I-JEPA and TS-JEPA. The conv stem keeps the token grid those
+  # four need and costs 1.6x per step against a linear stem that does not work.
+  stem: conv

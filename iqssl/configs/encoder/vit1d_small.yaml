@@ -1,4 +1,8 @@
+# The thesis-scale encoder. See vit1d_tiny.yaml for why `stem: conv` is not the
+# textbook default -- the two must agree, or the smoke runs would validate a
+# different control variable than the one the comparison uses.
 name: vit1d
 args:
   size: small
   patch_size: 16
+  stem: conv

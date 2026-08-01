@@ -253,23 +253,42 @@ project to be wrong by comparing across configurations — after the contended-v
 idle timing and the 1.9x that preceded it — and the only one that pointed the
 work away from the answer.
 
-The remaining question is *which* encoder, and it is not simply "use cnn1d":
+The remaining question was *which* encoder, and the answer is not "use cnn1d":
 `ResNet1D.forward_masked` raises `NotImplementedError`, so adopting it as the
 control variable would drop MAE, data2vec, I-JEPA and TS-JEPA — a third of the
-benchmark. The cheapest fix that would keep them is a finer patch, so that the
-linear projection spans fewer samples. It does not work:
+benchmark. The cheapest fix that would keep them is a finer patch, so the linear
+projection spans fewer samples. That does not work either, so the fix is not a
+config change:
 
 ```
-encoder                          train_acc, 400 steps        steps/s
-vit1d_tiny  patch 16             0.062 .. 0.062   flat         1.81
-vit1d_tiny  patch 8              0.062 .. 0.064   flat         0.80
-vit1d_tiny  patch 4              0.062 .. 0.059   flat         0.36
-cnn1d_tiny                       0.055 .. 0.123   rising       5.72
+encoder                        train_acc @1,200 steps    enc_std_mean    steps/s
+vit1d_tiny  linear, patch 16   0.061   flat              0.31 -> 0.067      1.81
+vit1d_tiny  linear, patch  8   0.064   flat              0.31 -> 0.088      0.80
+vit1d_tiny  linear, patch  4   0.059   flat              0.32 -> 0.088      0.36
+vit1d_tiny  conv,   patch 16   0.177   rising            0.28 -> 0.829      1.10
+cnn1d_tiny                     0.228   rising            0.19 -> 0.961      5.72
 ```
 
-All three ViT settings show the same contraction (`enc_std_mean` → ~0.088,
-`enc_rankme` → 31–35) at 5x and 2x the cost. Patch granularity is not the
-mechanism, so the fix is not a config change.
+**`vit1d` now defaults to `stem: conv`** — `models/vit1d.PatchStem`, a small CNN
+applied within each patch, mean **and** std pooled into the token. That mirrors
+what the difficulty gate measured to work, and it is what the linear embedding
+structurally cannot do: form a second moment. The contraction still happens for
+the first ~500 steps and then reverses, which is the shape the linear stem never
+reaches.
+
+Every convolution is confined to one patch, and that is correctness rather than
+tidiness. A stem run across the sequence at kernel 7 over four stride-2 layers
+has a 91-sample receptive field against a 16-sample patch, so MAE's *kept* tokens
+would already carry the content it is asked to reconstruct — its premise that the
+encoder never sees the masked input would become false while the whole suite
+still passed. `tests/test_methods.py` perturbs one patch and asserts no other
+token moves.
+
+Changing the control variable is a contract-level act, so: the previous default
+is preserved as `stem: linear` and both `vit1d_tiny` and `vit1d_small` were
+changed together, since a smoke run that validated a different encoder than the
+comparison uses would be worth nothing. `cnn1d_tiny` remains both faster and
+better on this task, and remains unusable as the shared backbone.
 
 Two measurements taken while narrowing this down, recorded so they are not
 re-derived: the `easy` buffers arrive at std 0.71 with per-buffer std spanning
@@ -277,11 +296,12 @@ re-derived: the `easy` buffers arrive at std 0.71 with per-buffer std spanning
 embedding has 1.7x the per-token norm of the patch content, which is high but
 within the range ViTs normally tolerate.
 
-**Do not read a method ranking off this preset yet, and do not launch the full
-sweep until a ceiling clears its floor here.** Stage 8 in particular must not run
-against this encoder: tuning nine trials on an objective that is chance for every
-configuration is precisely the failure the `--data` guard above was added to
-prevent, and it would arrive at a winner just the same.
+**Do not read a method ranking off this preset yet.** The ceiling now learns, but
+it has not been shown to clear the floor through the eval protocol — that is the
+next measurement, and Stage 8 must not run before it. Tuning nine trials on an
+objective that is chance for every configuration is precisely the failure the
+`--data` guard above was added to prevent, and it would arrive at a winner just
+the same.
 
 ### A note on the gitignore incident
 
