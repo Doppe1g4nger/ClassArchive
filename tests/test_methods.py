@@ -291,6 +291,46 @@ class TestViT1D:
         with pytest.raises(ValueError, match="divisible"):
             ViT1D(seq_len=100, patch_size=16)
 
+    def test_conv_stem_matches_the_linear_stem_everywhere_but_the_tokenizer(self):
+        """The stem is swappable, so every downstream path must be unaffected."""
+        for stem in ("linear", "conv"):
+            enc = ViT1D(
+                seq_len=SEQ_LEN, patch_size=PATCH, embed_dim=64, depth=2, num_heads=2, stem=stem
+            )
+            n = SEQ_LEN // PATCH
+            x = torch.randn(3, 2, SEQ_LEN)
+            assert enc(x, return_tokens=True).tokens.shape == (3, n, 64)
+            assert enc.forward_masked(x, torch.arange(n // 2).expand(3, -1)).shape[1] == n // 2 + 1
+            assert enc.forward_with_mask_token(x, torch.zeros(3, n, dtype=torch.bool)).shape == (
+                3,
+                n,
+                64,
+            )
+
+    def test_conv_stem_token_cannot_see_outside_its_own_patch(self):
+        """The property that keeps the conv stem honest for the masked methods.
+
+        A stem run across the whole sequence would give each token a receptive
+        field several patches wide, so MAE's *kept* tokens would already carry
+        the content it is asked to reconstruct — its premise that the encoder
+        never sees the masked input would quietly become false, and nothing else
+        in the suite would notice. Perturbing one patch must move that patch's
+        token and no other.
+        """
+        enc = ViT1D(
+            seq_len=SEQ_LEN, patch_size=PATCH, embed_dim=64, depth=2, num_heads=2, stem="conv"
+        ).eval()  # eval(): BatchNorm in train mode couples samples through the batch.
+        x = torch.randn(1, 2, SEQ_LEN)
+        perturbed = x.clone()
+        perturbed[:, :, 2 * PATCH : 3 * PATCH] += 5.0
+
+        with torch.no_grad():
+            moved = (enc.patch_embed(x) - enc.patch_embed(perturbed)).abs().amax(-1)[0]
+
+        assert moved[2] > 1e-4, "the perturbed patch's own token did not move"
+        untouched = torch.cat([moved[:2], moved[3:]])
+        assert untouched.max() < 1e-6, f"leaked into neighbouring tokens: {untouched.max():.3g}"
+
     def test_forward_masked_keeps_only_requested_tokens(self):
         enc = tiny_encoder()
         n = SEQ_LEN // PATCH

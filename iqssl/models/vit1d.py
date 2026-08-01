@@ -21,6 +21,7 @@ changes the method.
 
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass
 
@@ -103,11 +104,81 @@ class Block(nn.Module):
         return x + self.drop_path(self.mlp(self.norm2(x)))
 
 
+class PatchStem(nn.Module):
+    """Nonlinear tokenizer: one small CNN applied *within* each patch.
+
+    The linear alternative (``nn.Conv1d(in_ch, dim, P, stride=P)``) is what a ViT
+    normally uses, and on this data it does not work. The emitter fingerprint is
+    second-order -- IQ imbalance lives in ``E[z²]``, PA compression in envelope
+    variance, phase noise in ``dphi`` variance -- and a linear map of 16 raw
+    samples cannot form any of them. The difficulty gate had already measured the
+    same wall from the other side: ``SmallCNN`` scored 0.77 with mean pooling and
+    0.891 once std pooling was added, because "an average cannot represent a
+    second moment". Measured here, a linear-stem ViT sits at chance for its whole
+    budget while ``cnn1d_tiny`` -- convolutions at full resolution, mean+std
+    pooling -- learns immediately.
+
+    So this mirrors what was measured to work: strided convs with a nonlinearity,
+    then mean **and** std pooled into the token.
+
+    Every conv is confined to a single patch, which is the constraint that makes
+    this safe for the masked methods. A stem run across the whole sequence would
+    give each token a receptive field several patches wide -- at kernel 7 and
+    four stride-2 layers, 91 samples against a patch of 16 -- so MAE's kept
+    tokens would already contain the content it is asked to reconstruct, and its
+    "the encoder genuinely never sees 75% of the input" premise would be false
+    while every test still passed. Reshaping the patch axis into the batch axis
+    keeps the receptive field exactly one patch wide by construction.
+    """
+
+    def __init__(self, in_ch: int, patch_size: int, embed_dim: int, depth: int = 2) -> None:
+        super().__init__()
+        if patch_size % (2**depth):
+            raise ValueError(
+                f"patch_size {patch_size} must be divisible by {2**depth} for a "
+                f"depth-{depth} stem; each layer halves the within-patch length"
+            )
+        self.patch_size = patch_size
+        self.in_ch = in_ch
+
+        width = max(embed_dim // 2, 16)
+        chans = [in_ch] + [width] * depth
+        layers: list[nn.Module] = []
+        for a, b in itertools.pairwise(chans):
+            layers += [
+                nn.Conv1d(a, b, kernel_size=5, stride=2, padding=2, bias=False),
+                nn.BatchNorm1d(b),
+                nn.ReLU(inplace=True),
+            ]
+        self.convs = nn.Sequential(*layers)
+        # mean ++ std, hence 2x.
+        self.proj = nn.Linear(width * 2, embed_dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """``(B, C, L)`` -> ``(B, N, D)``, N = L / patch_size."""
+        b, c, length = x.shape
+        n = length // self.patch_size
+        # (B, C, L) -> (B*N, C, P): the patch axis becomes batch, so no
+        # convolution can reach across a patch boundary.
+        patches = x.reshape(b, c, n, self.patch_size).permute(0, 2, 1, 3).reshape(b * n, c, -1)
+
+        h = self.convs(patches)
+        # Biased std, and via the variance so the gradient at zero is finite --
+        # a patch of identical samples is rare but not impossible (a dead
+        # receiver, a zero-padded tail) and would otherwise produce NaNs.
+        stats = torch.cat([h.mean(-1), h.var(-1, unbiased=False).clamp_min(1e-12).sqrt()], dim=-1)
+        return self.proj(stats).view(b, n, -1)
+
+
 class ViT1D(nn.Module):
     """1D ViT over IQ patches.
 
-    Input ``(B, 2, L)`` float32; ``L / patch_size`` tokens via a strided conv.
-    At the defaults (L=1024, patch=16) that is 64 tokens.
+    Input ``(B, 2, L)`` float32; ``L / patch_size`` tokens. At the defaults
+    (L=1024, patch=16) that is 64 tokens.
+
+    ``stem`` selects how a patch becomes a token: ``"linear"`` is the textbook
+    strided convolution, ``"conv"`` is :class:`PatchStem`. The choice is not
+    cosmetic on this data -- see that class for the measurements.
     """
 
     supports_masking = True
@@ -124,10 +195,13 @@ class ViT1D(nn.Module):
         drop_path: float = 0.1,
         use_cls_token: bool = True,
         pool: str = "cls",
+        stem: str = "linear",
     ) -> None:
         super().__init__()
         if seq_len % patch_size:
             raise ValueError(f"seq_len {seq_len} must be divisible by patch_size {patch_size}")
+        if stem not in ("linear", "conv"):
+            raise ValueError(f"unknown stem {stem!r}; options: linear, conv")
 
         self.patch_size = patch_size
         self.embed_dim = embed_dim
@@ -136,7 +210,12 @@ class ViT1D(nn.Module):
         self.pool = pool
         self.use_cls_token = use_cls_token
 
-        self.patch_embed = nn.Conv1d(in_ch, embed_dim, patch_size, stride=patch_size)
+        self.stem_kind = stem
+        self.patch_embed: nn.Module = (
+            PatchStem(in_ch, patch_size, embed_dim)
+            if stem == "conv"
+            else nn.Conv1d(in_ch, embed_dim, patch_size, stride=patch_size)
+        )
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if use_cls_token else None
         self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         """Used by in-place masking (data2vec). MAE drops tokens instead."""
@@ -171,7 +250,9 @@ class ViT1D(nn.Module):
 
     def tokenize(self, x: Tensor) -> Tensor:
         """``(B, 2, L)`` -> ``(B, N, D)`` patch tokens with positions added."""
-        return self.patch_embed(x).transpose(1, 2) + self.pos_embed
+        # PatchStem already emits (B, N, D); the strided conv emits (B, D, N).
+        h = self.patch_embed(x)
+        return (h if self.stem_kind == "conv" else h.transpose(1, 2)) + self.pos_embed
 
     def _prepend_cls(self, tokens: Tensor) -> Tensor:
         if self.cls_token is None:
