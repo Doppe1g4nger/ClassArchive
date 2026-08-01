@@ -194,13 +194,57 @@ the budget ended 1,600 steps later with the curve still bending. Train accuracy
 more optimization might. Extrapolating the inflection, something like 20k steps
 (~5 h on four CPU cores) would be needed to find out.
 
+That read was too generous, and the follow-up says so. Its implied diagnosis —
+learning began only once cosine decay had cut the LR ~50x below its peak, so the
+LR was too high — was tested directly and **refuted**. Three 1,200-step runs at
+`base_lr` 2e-4, 5e-5 and 1e-5, a 20x span, holding everything else at
+`easy_long`:
+
+```
+base_lr      train_acc, steps 0 -> 1100          loss
+2.0e-4       0.061 .. 0.064 .. 0.061   (flat)    2.775 -> 2.773
+5.0e-5       0.057 .. 0.063 .. 0.059   (flat)    2.776 -> 2.773
+1.0e-5       0.063 .. 0.063 .. 0.060   (flat)    2.774 -> 2.773
+```
+
+Every arm sits at chance for its whole budget, at a loss of ln 16 to four
+figures. The encoder diagnostics are what make this more than "too few steps":
+
+```
+              step 0 -> 1100
+grad_norm     1.33 -> 1.21        gradients flow; clipped every step at 1.0
+enc_dead_dims 0    -> 0           nothing is saturated
+enc_std_mean  0.31 -> 0.067       representation contracting
+enc_rankme    49.7 -> 36.6        ...and losing rank, fastest at the highest LR
+```
+
+A model that is merely undertrained does not shed effective rank. This one is
+being driven *onto* the uniform-output solution — which is the loss-minimizing
+answer when the label is not recoverable from what reaches the classifier.
+
+So the question is no longer the schedule; it is whether the signal survives the
+encoder. Two candidates, both under test:
+
+* **The augmentation.** `easy_long`'s header claims augmentation would confound
+  the can-it-learn question, then sets `augment: light` — and `Supervised`
+  requests one *augmented* view, so every sample gets a uniform global phase
+  rotation at p=1.0. The difficulty gate's 0.891 oracle saw raw stored buffers.
+  The `d = 13.3` measurement that certified `light` as free was taken on the
+  classical features, several of which (circularity, envelope statistics) are
+  phase-invariant by construction, so it does not transfer to a raw-IQ ViT.
+* **The encoder.** The fingerprint is second-order — IQ imbalance lives in
+  `E[z²]`, PA compression in envelope variance, phase noise in `dphi` variance.
+  `SmallCNN` reaches 0.891 with a full-resolution conv stem and mean+std
+  pooling, and its own docstring records that mean-only pooling capped it at
+  0.77, because "an average cannot represent a second moment". `vit1d` applies a
+  *linear* projection to each 16-sample patch and then pools with a CLS token.
+
 **Do not read a method ranking off this preset yet, and do not launch the full
-sweep until a ceiling clears its floor here.** The open question is whether the
-ViT gets there with more steps or whether the control encoder should become
-`cnn1d` — which the difficulty gate's CNN result mildly favours, at ~5.8x the
-cost per step (measured: 0.185 steps/s against the ViT's 1.08, because the ViT's
-stride-16 patch embedding discards 15/16 of the sequence before any attention
-runs, while the CNN stem processes it at full resolution).
+sweep until a ceiling clears its floor here.** If the encoder is the answer, the
+control variable becomes `cnn1d` at ~5.8x the cost per step (measured: 0.185
+steps/s against the ViT's 1.08, because the ViT's stride-16 patch embedding
+discards 15/16 of the sequence before any attention runs, while the CNN stem
+processes it at full resolution).
 
 ### A note on the gitignore incident
 
