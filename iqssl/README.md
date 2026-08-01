@@ -253,13 +253,35 @@ project to be wrong by comparing across configurations — after the contended-v
 idle timing and the 1.9x that preceded it — and the only one that pointed the
 work away from the answer.
 
+The remaining question is *which* encoder, and it is not simply "use cnn1d":
+`ResNet1D.forward_masked` raises `NotImplementedError`, so adopting it as the
+control variable would drop MAE, data2vec, I-JEPA and TS-JEPA — a third of the
+benchmark. The cheapest fix that would keep them is a finer patch, so that the
+linear projection spans fewer samples. It does not work:
+
+```
+encoder                          train_acc, 400 steps        steps/s
+vit1d_tiny  patch 16             0.062 .. 0.062   flat         1.81
+vit1d_tiny  patch 8              0.062 .. 0.064   flat         0.80
+vit1d_tiny  patch 4              0.062 .. 0.059   flat         0.36
+cnn1d_tiny                       0.055 .. 0.123   rising       5.72
+```
+
+All three ViT settings show the same contraction (`enc_std_mean` → ~0.088,
+`enc_rankme` → 31–35) at 5x and 2x the cost. Patch granularity is not the
+mechanism, so the fix is not a config change.
+
+Two measurements taken while narrowing this down, recorded so they are not
+re-derived: the `easy` buffers arrive at std 0.71 with per-buffer std spanning
+0.47–0.71, so there is no input-scale pathology; and the fixed sincos positional
+embedding has 1.7x the per-token norm of the patch content, which is high but
+within the range ViTs normally tolerate.
+
 **Do not read a method ranking off this preset yet, and do not launch the full
-sweep until a ceiling clears its floor here.** The remaining question is *which*
-encoder, and it is not simply "use cnn1d": `ResNet1D.forward_masked` raises
-`NotImplementedError`, so adopting it as the control variable would drop MAE,
-data2vec, I-JEPA and TS-JEPA — a third of the benchmark. A finer ViT patch would
-fix the expressiveness problem while keeping the token grid those four need, and
-that is what is under test now.
+sweep until a ceiling clears its floor here.** Stage 8 in particular must not run
+against this encoder: tuning nine trials on an objective that is chance for every
+configuration is precisely the failure the `--data` guard above was added to
+prevent, and it would arrive at a winner just the same.
 
 ### A note on the gitignore incident
 
