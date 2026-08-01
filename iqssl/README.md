@@ -398,9 +398,11 @@ iqssl-aggregate --root outputs/smoke_cpu --out results/smoke
 Sweep across methods and seeds (`-m` is Hydra's multirun):
 
 ```bash
-# 1. tune each method on its own equal budget (nine trials, selected on val)
+# 1. tune each method on its own equal budget (nine trials, selected on val).
+#    --data is required: `hpo` pins no dataset, so that tuning cannot silently
+#    inherit the smoke default and optimize a probe score that is chance.
 for m in simclr supcon barlow vicreg byol simsiam mae ijepa tsjepa data2vec supervised; do
-  iqssl-sweep --method $m --experiment hpo
+  iqssl-sweep --method $m --experiment hpo --data data/easy
 done
 
 # 2. three seeds at each winner, then evaluate and aggregate
@@ -412,6 +414,52 @@ iqssl-aggregate --root outputs/main_comparison --out results/main
 
 `random` is absent from the tuning loop deliberately: an untrained encoder has
 no hyperparameters, and nine trials would measure nothing nine times.
+
+## Running it on a GPU
+
+The full comparison is 12 methods x 3 seeds at `main_comparison` scale, ~1.2M
+optimizer steps, plus 12 x 9 tuning trials. At the ~1.1 steps/s measured on four
+CPU cores that is on the order of two weeks, which is why the sweep is gated
+rather than merely queued. It is an overnight job on one GPU.
+
+Switching is a config change — `train.device`, and `main_comparison` already sets
+it — because the one thing that usually has to be rebuilt is already right:
+`train/loop.py` moves the batch to the device *before* `ViewPipeline` runs, so
+all the augmentation DSP executes on the accelerator as batched torch ops.
+Dataloader workers only read a memmap and crop.
+
+```bash
+iqssl-build-dataset --out data/easy --difficulty easy --n-samples 120000
+iqssl-pretrain experiment=easy_long method=supervised train.device=cuda
+```
+
+Regenerate the dataset rather than copying it. It is ~1.2 GB, gitignored, and
+deterministic from its seed, and `MANIFEST.json` carries a `dataset_hash` that
+`iqssl-evaluate` checks before it will score a run — so a rebuild that produces
+a matching hash is a stronger guarantee than a file transfer.
+
+Three things to know:
+
+* **Precision is a contract setting, not a host flag.** `train.precision` is
+  fp32 / bf16 / fp16, held constant across methods like batch size, and
+  `METHOD_TUNABLE` refuses to let a method config set it — a bf16 method scored
+  against an fp32 one measures numerical tolerance alongside objective quality.
+  bf16 is the default on `main_comparison` because it needs no loss scaler. It is
+  ignored on CPU whatever is asked for, so the CI smoke tier keeps exercising the
+  same numerical path a real run does.
+* **Apple silicon is `mps`, not `cuda`,** and some ops may lack MPS kernels.
+  `resolve_device` fails with a message naming the knob rather than a kernel
+  error much later; try `experiment=smoke_cpu train.device=mps` first. There is
+  deliberately no automatic CPU fallback — a run that silently drops to CPU looks
+  identical in its output and takes ~100x longer to say so.
+* **The bottleneck will not be arithmetic.** `vit1d_small` is 384-d, 8 layers, 65
+  tokens; at batch 256 a modern GPU is launch-bound, not compute-bound. The
+  instinct is to raise the batch size and you cannot — it is fixed by the
+  contract, and changing it changes `lr = base_lr·B/256` for every method at
+  once. The lever is running several of the 144 independent runs concurrently on
+  one GPU. Measure one run alone first and record that number, *then* parallelize
+  for throughput: co-tenanted runs make steps/s unmeasurable, which is how four
+  numbers in this project have already gone wrong.
 
 ## Layout
 

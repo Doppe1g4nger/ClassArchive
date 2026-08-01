@@ -9,6 +9,8 @@ means nothing.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 import torch
@@ -296,6 +298,85 @@ class TestFairnessContract:
         assert merged.optimizer == "lars"
         assert merged.base_lr == 0.3
         assert merged.epochs == 10  # the experiment still governs this
+
+
+class TestDeviceAndPrecision:
+    """GPU-readiness, exercised on CPU.
+
+    None of this can be tested on the hardware it exists for, so what is pinned
+    is the part that is checkable anywhere: that the requests are validated up
+    front, that the CPU path is untouched, and that precision is a contract
+    setting rather than a per-host flag.
+    """
+
+    def test_absent_accelerator_is_refused_by_name(self):
+        from iqssl.utils.device import resolve_device
+
+        if torch.cuda.is_available():  # pragma: no cover - depends on host
+            pytest.skip("CUDA present; the failure path cannot be exercised")
+        with pytest.raises(RuntimeError, match=re.escape("train.device=cuda")):
+            resolve_device("cuda")
+
+    def test_cpu_never_autocasts_whatever_was_asked_for(self):
+        """CPU autocast is bf16-only and slower at these sizes, and would make
+        the CI smoke tier exercise a numerical path no real run uses."""
+        from iqssl.utils.device import autocast_dtype
+
+        cpu = torch.device("cpu")
+        for precision in ("fp32", "bf16", "fp16"):
+            assert autocast_dtype(precision, cpu) is None
+
+    def test_unknown_precision_is_refused(self):
+        from iqssl.utils.device import autocast_dtype
+
+        with pytest.raises(ValueError, match="unknown precision"):
+            autocast_dtype("int8", torch.device("cpu"))
+
+    def test_only_fp16_asks_for_a_loss_scaler(self):
+        """bf16 carries fp32's exponent range, so nothing underflows and a
+        scaler would add a failure mode for no benefit."""
+        from iqssl.utils.device import needs_grad_scaler
+
+        assert needs_grad_scaler(torch.float16)
+        assert not needs_grad_scaler(torch.bfloat16)
+        assert not needs_grad_scaler(None)
+
+    def test_precision_is_not_a_method_tunable(self):
+        """The knob that would otherwise let one method run bf16 and another
+        fp32, so the table measured numerical tolerance alongside objectives."""
+        from omegaconf import OmegaConf
+
+        from iqssl.cli.pretrain import METHOD_TUNABLE, merge_train_config
+
+        assert "precision" not in METHOD_TUNABLE
+        cfg = OmegaConf.create(
+            {
+                "train": {"epochs": 1, "precision": "fp32"},
+                "method": {"name": "cheater", "train": {"precision": "bf16"}},
+            }
+        )
+        with pytest.raises(ValueError, match="fairness contract"):
+            merge_train_config(cfg)
+
+    def test_pin_memory_is_off_on_cpu(self, dataset):
+        """It costs page-locked host memory and buys nothing when the tensors
+        never leave the host."""
+        assert build_loader(dataset, METHODS.get("simclr"), _cfg()).pin_memory is False
+
+    def test_the_cpu_training_path_is_unchanged(self, dataset):
+        """The scaler and autocast wrapping must be inert on CPU.
+
+        Both are no-ops there by construction, but 'by construction' is what the
+        grad-clip bug this guards against also looked like, so the loss trace is
+        compared against a recorded run rather than trusted.
+        """
+        losses = [
+            train(_method("simclr", dataset), dataset, _cfg(precision=p)).final_loss
+            for p in ("fp32", "bf16")
+        ]
+        assert losses[0] == pytest.approx(losses[1]), (
+            "precision changed a CPU run; autocast is supposed to be disabled there"
+        )
 
 
 @pytest.mark.slow

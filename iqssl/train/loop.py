@@ -16,6 +16,7 @@ was spent.
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from iqssl.methods.base import Method
 from iqssl.train.optim import build_optimizer
 from iqssl.train.schedules import apply_lr, scale_base_lr
 from iqssl.utils import env
+from iqssl.utils.device import autocast_dtype, needs_grad_scaler, resolve_device
 from iqssl.utils.logging_ import build_logger, get_logger, write_json
 from iqssl.utils.meters import ComputeMeter, MeterDict
 from iqssl.utils.seed import seed_everything, worker_init_fn
@@ -52,6 +54,14 @@ class TrainConfig:
     seed: int = 0
     num_workers: int = 0
     device: str = "cpu"
+    precision: str = "fp32"
+    """fp32 / bf16 / fp16. Held constant across methods, like batch size.
+
+    Not a per-host performance flag: comparing a bf16 method against an fp32 one
+    would measure numerical tolerance alongside objective quality. Ignored on
+    CPU -- see :func:`iqssl.utils.device.autocast_dtype`.
+    """
+
     augment: str = "standard"
     log_every: int = 20
     probe_every: int = 0
@@ -103,6 +113,10 @@ def build_loader(
         drop_last=True,
         worker_init_fn=worker_init_fn if cfg.num_workers else None,
         persistent_workers=cfg.num_workers > 0,
+        # Page-locked staging so the host-to-device copy can overlap compute.
+        # Only on CUDA: it costs real memory and buys nothing when the tensors
+        # never leave the host.
+        pin_memory=torch.device(cfg.device).type == "cuda",
     )
 
 
@@ -116,7 +130,9 @@ def train(
 ) -> TrainState:
     """Pretrain one method. Returns the run state; writes logs to ``out_dir``."""
     seed_everything(cfg.seed)
-    device = torch.device(cfg.device)
+    device = resolve_device(cfg.device)
+    amp_dtype = autocast_dtype(cfg.precision, device)
+    scaler = torch.amp.GradScaler(device.type, enabled=needs_grad_scaler(amp_dtype))
     method = method.to(device)
 
     spec = type(method).view_spec(method_cfg)
@@ -193,21 +209,44 @@ def train(
                 done = True
                 break
 
-            batch = batch.to(device)
+            # non_blocking pairs with the loader's pin_memory: the copy overlaps
+            # the previous step's compute instead of serialising with it. A no-op
+            # on CPU, where the memory is already where it needs to be.
+            batch = batch.to(device, non_blocking=device.type == "cuda")
             batch = pipeline(batch)
 
             current_lr = apply_lr(optimizer, state.step, total_steps, cfg.warmup_frac)
             optimizer.zero_grad(set_to_none=True)
 
-            out_ = method(batch, state.step, total_steps)
-            out_.loss.backward()
+            # Augmentation deliberately stays outside autocast: it is signal
+            # processing, not network arithmetic, and half-precision phase
+            # accumulation over a 1024-sample buffer loses the small impairments
+            # the emitter label is made of. Only the model's own maths is cast.
+            # nullcontext rather than autocast(enabled=False): the disabled path
+            # is then provably a no-op, instead of depending on how a given
+            # backend handles being handed a context it does not support.
+            amp = (
+                nullcontext() if amp_dtype is None else torch.autocast(device.type, dtype=amp_dtype)
+            )
+            with amp:
+                out_ = method(batch, state.step, total_steps)
+            scaler.scale(out_.loss).backward()
 
+            # Unscale before clipping. With fp16 the gradients in .grad are
+            # multiplied by the scaler's factor, so clipping them against
+            # grad_clip=1.0 without this would compare a scaled norm to an
+            # unscaled threshold -- clipping essentially every step, by a factor
+            # that drifts as the scaler adapts. The loss curve would look
+            # entirely normal. This is a no-op when the scaler is disabled.
+            if scaler.is_enabled():
+                scaler.unscale_(optimizer)
             grad_norm = float(
                 nn.utils.clip_grad_norm_(method.parameters(), cfg.grad_clip)
                 if cfg.grad_clip > 0
                 else 0.0
             )
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # After the optimizer step, which is what the published EMA
             # algorithms specify -- updating before it makes the teacher track a

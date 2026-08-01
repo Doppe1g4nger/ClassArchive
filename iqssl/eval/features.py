@@ -21,6 +21,7 @@ import torch
 from torch import Tensor, nn
 
 from iqssl.data.dataset import IQDataset
+from iqssl.utils.device import resolve_device
 
 POOL = "mean"
 EXTRACT_BATCH = 256
@@ -59,7 +60,7 @@ def extract(
     RNG of its own and is identical across every caller. Hyperparameter search
     uses it to keep per-trial cost bounded; the reported protocol never does.
     """
-    dev = torch.device(device)
+    dev = resolve_device(str(device))
     encoder = encoder.to(dev).eval()
 
     n = len(dataset) if limit is None else min(limit, len(dataset))

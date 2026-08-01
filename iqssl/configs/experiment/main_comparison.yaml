@@ -8,6 +8,16 @@ train:
   warmup_frac: 0.1
   grad_clip: 1.0
   device: cuda
+  # Held constant like batch size, not tuned per host: a bf16 method compared
+  # against an fp32 one measures numerical tolerance alongside objective
+  # quality. bf16 rather than fp16 because it needs no loss scaler, and the
+  # scaler interacts with grad clipping in a way that fails silently. Needs
+  # Ampere or newer; `train.precision=fp16` is the fallback and is tested.
+  precision: bf16
+  # Pairs with pin_memory, which build_loader enables on CUDA. Four workers per
+  # run is a starting point -- raise it until steps/s stops improving, and
+  # measure that on a machine running nothing else.
+  num_workers: 4
   log_every: 50
   probe_every: 100
 data:
