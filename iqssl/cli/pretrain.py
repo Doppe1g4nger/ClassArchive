@@ -235,6 +235,16 @@ def build_method(cfg: DictConfig, seq_len: int, seed: int = 0, n_classes: int | 
 def main(cfg: DictConfig) -> float:
     setup_console_logging(logging.INFO)
 
+    # `hpo` blanks data.root so that tuning cannot silently inherit the smoke
+    # default; reached directly rather than through iqssl-sweep, say so here
+    # instead of failing somewhere inside Path(None).
+    if cfg.data.root is None:
+        raise ValueError(
+            f"experiment {cfg.experiment!r} names no dataset -- pass data.root=data/easy. "
+            "It is left unset on purpose, so that a tuning run cannot quietly compose "
+            "onto the root default and optimize a probe score that is chance."
+        )
+
     dataset = IQDataset(
         cfg.data.root,
         "train",

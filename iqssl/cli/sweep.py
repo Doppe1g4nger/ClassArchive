@@ -1,7 +1,7 @@
 """Run the equal-budget hyperparameter sweep for one method.
 
-    iqssl-sweep --method simclr --experiment hpo
-    iqssl-sweep --method mae --dry-run          # print the command, run nothing
+    iqssl-sweep --method simclr --data data/easy
+    iqssl-sweep --method mae --data data/easy --dry-run   # print the command, run nothing
 
 A thin driver rather than a second experiment framework. Hydra's Optuna sweeper
 does the search; this assembles the invocation from the method's own ``search:``
@@ -14,6 +14,9 @@ they run *before* nine trials of compute rather than after:
 * ``experiment=hpo`` sets ``val_probe: true``, so what the sweeper maximizes is
   a validation probe score. Sweeping without it would optimize the pretraining
   loss, and BYOL and SimSiam reach near-zero loss exactly when they collapse.
+* ``--data`` is required, because ``hpo`` pins no dataset. An objective is only
+  a signal where the task is learnable; on a dataset where every method probes
+  at chance, nine trials rank noise and still report a winner.
 
 Doing this in argparse, outside Hydra, is deliberate: a driver that composed
 itself from the same config tree it validates could be overridden into skipping
@@ -29,7 +32,7 @@ import sys
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from iqssl.cli.pretrain import CONFIG_DIR, N_TRIALS, check_search_space, check_sweep_budget
 from iqssl.registry import autodiscover
@@ -38,18 +41,24 @@ from iqssl.utils.logging_ import get_logger, setup_console_logging
 log = get_logger(__name__)
 
 
-def load_cfg(method: str, experiment: str) -> DictConfig:
+def load_cfg(method: str, experiment: str, data_root: str | None = None) -> DictConfig:
     autodiscover()
+    overrides = [f"method={method}", f"experiment={experiment}"]
+    if data_root is not None:
+        overrides.append(f"data.root={data_root}")
     with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
-        return compose(
-            config_name="pretrain",
-            overrides=[f"method={method}", f"experiment={experiment}"],
-        )
+        return compose(config_name="pretrain", overrides=overrides)
 
 
-def build_command(method: str, experiment: str, n_trials: int, extra: list[str]) -> list[str]:
+def build_command(
+    method: str,
+    experiment: str,
+    n_trials: int,
+    extra: list[str],
+    data_root: str | None = None,
+) -> list[str]:
     """Assemble (and validate) the sweep invocation."""
-    cfg = load_cfg(method, experiment)
+    cfg = load_cfg(method, experiment, data_root)
 
     check_sweep_budget(n_trials)
     space = check_search_space(cfg)
@@ -65,6 +74,13 @@ def build_command(method: str, experiment: str, n_trials: int, extra: list[str])
             "return the pretraining loss and the sweeper would optimize that. For the "
             "negative-free methods that selects collapse. Use experiment=hpo."
         )
+    if OmegaConf.is_missing(cfg.data, "root") or cfg.data.root is None:
+        raise ValueError(
+            f"experiment {experiment!r} names no dataset, so pass --data. Tuning has to "
+            "run on the data the comparison reports: the val-probe objective is only a "
+            "signal where the task is learnable, and on a dataset where every method "
+            "probes at chance the sweep ranks noise and still names a winner."
+        )
 
     cmd = [
         sys.executable,
@@ -76,6 +92,8 @@ def build_command(method: str, experiment: str, n_trials: int, extra: list[str])
         f"method={method}",
         f"experiment={experiment}",
     ]
+    if data_root is not None:
+        cmd.append(f"data.root={data_root}")
     cmd += [f"hydra.sweeper.params.{k}={v}" for k, v in space.items()]
     return cmd + extra
 
@@ -86,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--method", required=True)
     p.add_argument("--experiment", default="hpo")
+    p.add_argument(
+        "--data",
+        default=None,
+        help="dataset root to tune on, e.g. data/easy. Required by experiment=hpo, "
+        "which pins no dataset of its own so that inheriting the smoke default "
+        "cannot happen silently",
+    )
     p.add_argument(
         "--n-trials",
         type=int,
@@ -102,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     setup_console_logging(logging.INFO)
 
-    cmd = build_command(args.method, args.experiment, args.n_trials, args.overrides)
+    cmd = build_command(
+        args.method, args.experiment, args.n_trials, args.overrides, data_root=args.data
+    )
     printable = " ".join(cmd)
     if args.dry_run:
         print(printable)

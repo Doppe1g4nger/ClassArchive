@@ -138,10 +138,20 @@ class TestSweepDriver:
     def test_command_includes_budget_and_space(self):
         from iqssl.cli.sweep import build_command
 
-        cmd = " ".join(build_command("simclr", "hpo", N_TRIALS, []))
+        cmd = " ".join(build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy"))
         assert f"hydra.sweeper.n_trials={N_TRIALS}" in cmd
         assert "hydra/sweeper=equal_budget" in cmd
         assert "hydra.sweeper.params.method.args.temperature" in cmd
+        assert "data.root=data/easy" in cmd
+
+    def test_refuses_to_tune_without_a_named_dataset(self):
+        """`hpo` pins no `data:` group, and an experiment that names none composes
+        onto the root default -- `smoke`, where the difficulty gate showed every
+        method at chance. Nine trials would maximize noise and report a winner."""
+        from iqssl.cli.sweep import build_command
+
+        with pytest.raises(ValueError, match="names no dataset"):
+            build_command("simclr", "hpo", N_TRIALS, [])
 
     def test_refuses_an_experiment_without_the_val_probe(self):
         """Sweeping smoke_cpu would optimize the pretraining loss, which for the

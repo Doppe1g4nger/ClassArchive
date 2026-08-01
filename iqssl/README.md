@@ -340,6 +340,15 @@ would handicap several methods), tuned LR and weight decay, projector and predic
 method-specific coefficients. **Fix the encoder, not the heads**: Barlow Twins and VICReg genuinely
 need wide projectors, so capping them at 128-d would be a handicap dressed up as fairness.
 
+**The shipped `base_lr` values are provisional.** Every `base_lr` in `configs/method/*.yaml` is a
+published default lifted from a paper that tuned it at ImageNet scale — batch 4096, natural images —
+and none has been validated at batch 128 on 1-D RF buffers. They are starting points for the sweep,
+not tuned values, and no comparison between two methods is fair until both have been through it.
+That they are guesses is not a footnote: the easy-scale viability gate spent 3,600 steps pinned at
+uniform output and began learning only once cosine decay had cut the LR ~50× below its peak.
+`supervised` is simply the one whose failure is legible, because it has a train accuracy to watch;
+a badly-tuned contrastive run just yields a mediocre representation and says nothing.
+
 Equal epochs is not equal compute, so every run logs `tokens_seen`, encoder forward passes,
 wall-clock and peak memory, and the results include a compute-vs-accuracy Pareto plot.
 
