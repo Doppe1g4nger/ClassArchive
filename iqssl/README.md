@@ -139,23 +139,44 @@ error bar is a reproducibility claim nobody measured.
 
 ### What the smoke scale can and cannot show
 
-All twelve methods pretrain and four (SimCLR, MAE, `supervised`, `random`) were
-evaluated end to end on the `smoke` preset. The protocol demonstrably resolves
-signal — the **modulation** probe reads ≈0.30 against a 0.10 chance line, for
-*random features* — but the **emitter** probe sits at chance (≈0.12, chance
-0.125) for every method, `supervised` included.
+All twelve methods pretrain and four are evaluated end to end on the `smoke`
+preset. Measured with the shipped conv-stem encoder, at fraction 1.0:
 
-That is a property of the preset, not a defect, and it was worth pinning down
-rather than assuming. `Supervised` memorizes 64 buffers to 100% accuracy in 60
-steps, so the objective and its gradient path are sound; it simply cannot
-*generalize* 8-way emitter identity from 2,861 training buffers with a ViT,
-which is data-starved at that size. The difficulty gate's purpose-built CNN
-reached only 0.31 on the same preset.
+| | emitter linear | knn | finetune | modulation linear | knn | finetune |
+| --- | --- | --- | --- | --- | --- | --- |
+| `supervised` | 0.150 | 0.149 | 0.133 | 0.569 | 0.460 | 0.704 |
+| `simclr` | 0.142 | 0.146 | 0.142 | 0.576 | 0.495 | 0.687 |
+| `mae` | 0.146 | 0.147 | 0.136 | 0.558 | 0.439 | 0.703 |
+| **`random`** | **0.152** | **0.152** | 0.135 | **0.578** | 0.456 | 0.692 |
+| chance | 0.125 | | | 0.100 | | |
 
-**So do not read a ceiling-above-floor ordering off smoke runs — there isn't
-one, and there shouldn't be.** That ordering is a property to check on `easy`
-or larger, where the gate already measured a CNN at 0.891. Smoke exists to
-exercise the plumbing in CI, and it does that well.
+**Every method ties the untrained encoder, and `random` nominally wins both
+axes.** That is the correct outcome and worth stating without euphemism:
+`smoke_cpu` runs `max_steps: 20`, and twenty optimizer steps is not training. The
+table measures random features four times with slightly different noise.
+
+Two things it does establish. The protocol resolves real signal — modulation at
+0.578 against a 0.100 chance line — and the whole path from generation through
+augmentation, all twelve objectives, checkpointing, probing and finetuning runs
+without error. That is what the tier is for.
+
+**Emitter identity is out of reach at this scale regardless of encoder.** The
+earlier version of this section reached the same conclusion, but its reasoning
+did not support it: it blamed a "data-starved ViT" using an encoder that could
+not learn emitter identity at *any* scale, so the preset was never the
+established cause. It is now. The same conv stem that reaches 0.746 on `easy`
+reaches 0.150 here, so 2,861 training buffers is the binding constraint.
+
+**Do not read a ceiling-above-floor ordering off smoke runs — there is none, and
+there should not be.** That ordering is a property of `easy` or larger, where it
+now measures 0.746 against 0.159.
+
+One number moved sharply and is worth recording, since it is a property of the
+encoder rather than of any method: **random-feature modulation accuracy roughly
+doubled**, from ≈0.30 with the linear patch embedding to 0.578 with the conv
+stem. Untrained `PatchStem` features are far stronger than untrained linear-embed
+ones — the same effect that lifted the `easy` floor from 0.092 to 0.159, visible
+here on the axis where random features were already competent.
 
 One cost worth knowing before a full sweep: the protocol finetunes at three
 label fractions on both label axes, so six full finetunes per run — 72 across a
