@@ -119,13 +119,17 @@ def sweeper_params_override(space: dict[str, str]) -> str:
     * Quoting the key to keep it flat is not available: Hydra's override grammar
       has no production for a quoted key.
 
-    What works is passing the whole mapping as one dict literal, whose keys may
-    contain dots precisely because they are not a path. Values stay quoted so
-    they arrive as strings; keys must stay *unquoted* or the grammar rejects
-    them.
+    * ``hydra.sweeper.params={train.base_lr: "..."}`` gets the shape right but
+      the verb wrong: merging new keys into ``params: {}`` is an *addition*, and
+      struct mode refuses additions phrased as overrides.
+
+    What works is that dict literal with ``+``: one mapping, keys containing
+    dots precisely because they are not a path, added rather than overridden.
+    Values stay quoted so they arrive as strings; keys must stay *unquoted* or
+    the grammar rejects them.
     """
     body = ", ".join(f'{k}: "{v}"' for k, v in space.items())
-    return f"hydra.sweeper.params={{{body}}}"
+    return f"+hydra.sweeper.params={{{body}}}"
 
 
 def build_parser() -> argparse.ArgumentParser:

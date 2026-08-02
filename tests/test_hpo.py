@@ -159,8 +159,8 @@ class TestSweepDriver:
         from iqssl.cli.sweep import build_command
 
         cmd = build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy")
-        params = [c for c in cmd if c.startswith("hydra.sweeper.params=")]
-        assert len(params) == 1, f"expected one params override, got {params}"
+        params = [c for c in cmd if c.startswith("+hydra.sweeper.params=")]
+        assert len(params) == 1, f"expected one appended params override, got {params}"
 
         override = OverridesParser.create().parse_overrides(params)[0]
         assert not override.is_sweep_override(), (
