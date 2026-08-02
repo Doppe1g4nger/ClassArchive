@@ -518,14 +518,46 @@ would handicap several methods), tuned LR and weight decay, projector and predic
 method-specific coefficients. **Fix the encoder, not the heads**: Barlow Twins and VICReg genuinely
 need wide projectors, so capping them at 128-d would be a handicap dressed up as fairness.
 
-**The shipped `base_lr` values are provisional.** Every `base_lr` in `configs/method/*.yaml` is a
-published default lifted from a paper that tuned it at ImageNet scale — batch 4096, natural images —
-and none has been validated at batch 128 on 1-D RF buffers. They are starting points for the sweep,
-not tuned values, and no comparison between two methods is fair until both have been through it.
-That they are guesses is not a footnote: the easy-scale viability gate spent 3,600 steps pinned at
-uniform output and began learning only once cosine decay had cut the LR ~50× below its peak.
-`supervised` is simply the one whose failure is legible, because it has a train accuracy to watch;
-a badly-tuned contrastive run just yields a mediocre representation and says nothing.
+**The shipped `base_lr` values are provisional for eleven of twelve methods.** Every `base_lr` in
+`configs/method/*.yaml` is a published default lifted from a paper that tuned it at ImageNet scale —
+batch 4096, natural images — and none has been validated at batch 128 on 1-D RF buffers. They are
+starting points for the sweep, not tuned values, and no comparison between two methods is fair
+until both have been through it.
+
+`supervised` is the one exception, and its sweep is worth reading for what it does and does not
+establish. Nine trials, 400 steps each, selecting on `val_probe_acc`:
+
+```
+trial    base_lr       wd   probe     knn  rankme
+    0   1.25e-03    0.059  0.1384  0.1930    39.8
+    1   1.61e-03    0.022  0.1331  0.2036    36.2
+    2   7.04e-04    0.040  0.1380  0.1680    48.5
+    3   7.61e-03    0.265  0.0756  0.0760     6.2   <- collapse
+    4   1.10e-04    0.001  0.1325  0.1364    61.7
+    5   1.03e-03    0.166  0.1415  0.1837    42.7   <- winner
+    6   3.17e-04    0.254  0.1380  0.1482    56.2
+    7   3.55e-03    0.003  0.0918  0.1298     5.9   <- collapse
+    8   4.29e-04    0.005  0.1371  0.1531    54.2
+```
+
+**What it establishes:** a viable region, roughly 1e-4 to 2e-3, whose edges the sweep reliably
+rejects. Both collapses sit above 3.5e-3. And it is the learning rate, not the weight decay:
+trial 3 confounded them (highest LR *and* heaviest decay), but trial 7 collapsed at nearly the
+lightest decay in the space while trial 6 ran decay 0.254 perfectly healthily.
+
+`rankme` is what separates the two failure modes, which the probe score alone cannot — too high
+crushes the representation (rank ~6), too low leaves it near its random initialization (rank 61.7,
+the highest in the sweep). Same poor score, opposite remedies.
+
+**What it does not establish:** that 1.03e-3 is better than second place. The seven healthy trials
+span 0.1325–0.1415, single seed, no error bars. At this budget the sweep excludes bad
+configurations; it does not finely rank good ones. Note also where the winner landed —
+`supervised.yaml` ships 1.0e-3, so nine trials confirmed the untuned published default to within
+3% rather than improving on it. The tuning stage demonstrated its machinery here, not its value.
+
+That the shipped values are guesses is not a footnote, though. The easy-scale viability gate spent
+3,600 steps pinned at uniform output, and the LR looked like the culprit for a full day before
+measurement showed the encoder was.
 
 Equal epochs is not equal compute, so every run logs `tokens_seen`, encoder forward passes,
 wall-clock and peak memory, and the results include a compute-vs-accuracy Pareto plot.

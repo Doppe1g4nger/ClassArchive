@@ -25,6 +25,13 @@ htmlcov/
 /results/
 !/results/frozen/
 /wandb/
+# Written into the working directory by the Optuna sweeper at the end of a
+# sweep, because pretrain.yaml sets hydra.sweep.dir=".". It records only the
+# winner, which the run directories already carry in full -- and committing it
+# would put one method's tuning result in the repository root as if it were a
+# project-level fact. Same family as the `pretrain.log` that got committed
+# before `hydra/job_logging: none` was set.
+/optimization_results.yaml
 *.pt
 *.ckpt
 *.log
