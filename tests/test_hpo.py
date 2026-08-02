@@ -144,6 +144,32 @@ class TestSweepDriver:
         assert "hydra.sweeper.params.method.args.temperature" in cmd
         assert "data.root=data/easy" in cmd
 
+    def test_search_space_values_survive_hydras_override_parser(self):
+        """The bug that made `iqssl-sweep` fail on its first real invocation.
+
+        Hydra parses `tag(log, interval(1e-4, 1e-2))` as a sweep expression, and
+        refuses sweep expressions on `hydra.*` keys -- so the driver aborted
+        before trial one with "Sweeping over Hydra's configuration is not
+        supported". Quoting keeps it a string for the Optuna sweeper to parse.
+        Dry-running the command could never have caught this: the text printed
+        was correct, and only Hydra's own parser rejects it.
+        """
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        from iqssl.cli.sweep import build_command
+
+        cmd = build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy")
+        params = [c for c in cmd if c.startswith("hydra.sweeper.params.")]
+        assert params, "no search space reached the command"
+
+        parser = OverridesParser.create()
+        for item in params:
+            override = parser.parse_overrides([item])[0]
+            assert not override.is_sweep_override(), (
+                f"{item!r} parses as a sweep over hydra config, which Hydra refuses"
+            )
+            assert isinstance(override.value(), str)
+
     def test_refuses_to_tune_without_a_named_dataset(self):
         """`hpo` pins no `data:` group, and an experiment that names none composes
         onto the root default -- `smoke`, where the difficulty gate showed every

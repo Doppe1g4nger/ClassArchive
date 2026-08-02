@@ -94,7 +94,13 @@ def build_command(
     ]
     if data_root is not None:
         cmd.append(f"data.root={data_root}")
-    cmd += [f"hydra.sweeper.params.{k}={v}" for k, v in space.items()]
+    # The quotes around the value are load-bearing, not style. Unquoted,
+    # Hydra's override parser reads `tag(log, interval(1e-4, 1e-2))` as a *sweep
+    # expression*, sees that the key lives in the `hydra.` namespace, and aborts
+    # with "Sweeping over Hydra's configuration is not supported". Quoted, it
+    # stays an ordinary string and reaches the Optuna sweeper, which is the thing
+    # that is supposed to parse it.
+    cmd += [f'hydra.sweeper.params.{k}="{v}"' for k, v in space.items()]
     return cmd + extra
 
 
