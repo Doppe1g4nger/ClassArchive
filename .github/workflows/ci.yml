@@ -44,10 +44,18 @@ jobs:
         run: uv run pytest -m "not slow" -q --cov=iqssl --durations=20
 
   smoke:
-    # Exercises the paths unit tests cannot: dataset generation to disk, the
-    # difficulty gate, and (once they land) a real training loop and the eval
-    # protocol. The training steps stay commented out until iqssl-pretrain
-    # exists -- a red CI job for unwritten code trains people to ignore CI.
+    # Exercises the paths unit tests cannot, by *running the commands*: dataset
+    # generation to disk, the difficulty gate, every method's training loop, the
+    # tuning sweep, the eval protocol and the aggregator.
+    #
+    # The distinction is not pedantic. Stage 8 shipped with 33 passing tests and
+    # had four separate blockers between it and its first trial -- a search-space
+    # value Hydra parsed as a sweep, a struct-mode override that needed to be an
+    # append, an uninstalled plugin, and a sweeper config missing two required
+    # arguments. Every test passed because each asserted on what `build_command`
+    # *returned*, and none on what happened when the command ran. A `--dry-run`
+    # could not catch them either: it printed a correct-looking command through
+    # all four. So the steps below shell out for real.
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -56,7 +64,10 @@ jobs:
         with:
           enable-cache: true
       - run: uv venv --python 3.11
-      - run: uv pip install -e ".[dev]"
+      # `.[sweep]` and not just `.[dev]`: hydra-optuna-sweeper is what
+      # iqssl-sweep is built on, it was declared in pyproject and installed
+      # nowhere, and that is why the sweep had never once run.
+      - run: uv pip install -e ".[dev,sweep]"
       - name: Build a tiny dataset
         run: uv run iqssl-build-dataset --out data/smoke --difficulty smoke --n-samples 4096
       - name: Difficulty gate report
@@ -74,13 +85,41 @@ jobs:
                    mae ijepa tsjepa data2vec supervised random; do
             uv run iqssl-pretrain experiment=smoke_cpu method=$m
           done
-      # - name: Aggregate
-      #   run: uv run iqssl-aggregate root=outputs/smoke_cpu   # stage 9
+      - name: Evaluate through the protocol
+        # Frozen probe, kNN and finetune at three label fractions on both label
+        # axes, plus the nuisance ridge. Never ran in CI before, so a change that
+        # broke the eval path would have surfaced only when someone evaluated a
+        # real run by hand.
+        #
+        # Three methods rather than one, so the aggregator below has a floor, a
+        # ceiling and a real method to pool -- which is what exercises the
+        # fairness-invariant check. One row would validate nothing.
+        run: |
+          for m in simclr supervised random; do
+            uv run iqssl-evaluate --run "$(ls -dt outputs/smoke_cpu/$m/seed0/*/ | head -1)"
+          done
+      - name: Tune one method end to end
+        # Nine trials at five steps each. The short schedule is legitimate here
+        # *because this is a plumbing test and not a fairness claim* -- the
+        # budget guard still enforces nine trials, and no number from this run
+        # is reported anywhere. What it checks is that the sweeper instantiates,
+        # that the search space survives Hydra's override parser, and that
+        # Optuna's sampled values actually reach the training loop.
+        run: |
+          uv run iqssl-sweep --method supervised --experiment hpo \
+            --data data/smoke train.max_steps=5
+      - name: Aggregate
+        # Stage 9. Pools the evaluated runs, enforces the fairness invariants,
+        # and writes tables and figures. argparse, not Hydra -- the eval protocol
+        # is deliberately not configurable per run. Figures are left on:
+        # matplotlib is a hard dependency, so a broken plotting path is a real
+        # break, and it is the only place the figure code runs at all.
+        run: uv run iqssl-aggregate --root outputs/smoke_cpu --out results/smoke
 
   slow:
     # The tiny-overfit matrix over every method. Too slow for every PR, but a
-    # silent collapse regression must not survive a night. No tests carry the
-    # `slow` marker yet; the job is wired so they run the moment they exist.
+    # silent collapse regression must not survive a night. `TestTinyOverfit` in
+    # tests/test_train.py carries the marker.
     if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[slow-ci]')
     runs-on: ubuntu-latest
     steps:
