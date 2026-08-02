@@ -162,26 +162,49 @@ label fractions on both label axes, so six full finetunes per run — 72 across 
 twelve-method sweep, which can exceed the pretraining it evaluates. Reporting
 both axes is deliberate, but budget for it.
 
-### The `easy`-scale viability gate: undertrained, not unlearnable
+### The `easy`-scale viability gate: PASSED
 
 `experiment=easy_long` asks the question that governs whether a ~324-run sweep is
 worth building toward: on data the difficulty gate certified (a SmallCNN reaches
 0.891 here), does the benchmark's own encoder, loop and eval protocol reproduce
-that? Measured at 5,600 steps × 128 = 717k samples, single seed:
+that? Measured at 5,600 steps × 128 = 717k samples, single seed, `--skip-finetune`:
 
-| | emitter probe @100% | modulation probe @100% |
-| --- | --- | --- |
-| `supervised` | 0.103 | 0.541 |
-| `random` | 0.092 | 0.523 |
-| chance | 0.0625 | 0.100 |
+| emitter @100% | linear | kNN | | modulation @100% | linear |
+| --- | --- | --- | --- | --- | --- |
+| `supervised` | **0.746** | 0.758 | | `supervised` | 0.794 |
+| `random` | **0.159** | 0.205 | | `random` | 0.727 |
+| chance | 0.0625 | | | chance | 0.100 |
 
-**The ceiling does not clear the floor on either axis.** Supervised training buys
-~0.01 over an untrained encoder — within seed noise. A twelve-method sweep at
-this budget would produce a table in which every method scores about the same as
-random features, which is precisely the outcome the gate exists to prevent.
+**The ceiling clears the floor by 0.587 on the emitter axis — 4.7x the floor,
+and kNN agrees independently.** The pipeline measures the headline task. Nothing
+here says anything about any SSL method; it says the instrument works.
 
-But the training curve says *undertrained*, not *unlearnable*, and the
-distinction is the whole point of logging train accuracy:
+Two readings that change how the rest should be interpreted:
+
+* **Modulation is nearly solved by untrained features** (`random` 0.727 against
+  the ceiling's 0.794). Emitter identity is the only axis with real
+  discriminating power at this difficulty, so a method that wins on modulation
+  has mostly demonstrated that random features are good.
+* **SNR is not being discarded.** The nuisance ridge shows training strips timing
+  offset (floor 0.462 → ceiling 0.052) and CFO (0.048 → 0.003) as intended, but
+  `snr_db_nominal` only falls 0.610 → **0.490**. Roughly half the ceiling's
+  representation is still explained by signal-to-noise ratio, which emitter
+  identity should not require. That is a live caveat on what the benchmark
+  measures, not a defect in this result.
+
+The floor had to be re-measured, not carried over. It rose from 0.092 to 0.159
+when the encoder changed, because an untrained `PatchStem` produces better random
+features than an untrained linear patch embedding. Reusing the old floor would
+have reported a gap of 0.654 and overstated the result by 11%.
+
+#### How this failed first, and what the failure taught
+
+The same experiment with the previous encoder read `supervised` 0.103 against
+`random` 0.092 — a gap of 0.011, inside seed noise. The record of how that was
+diagnosed is kept because three plausible explanations were wrong before the
+right one, and each wrong turn is cheap to repeat.
+
+The first reading was that the model was merely undertrained:
 
 ```
 step     0-3600 : loss 2.773 (= ln 16), train_acc 0.062 (= chance)   -- flat
@@ -189,12 +212,10 @@ step  4000-5200 : loss 2.765 -> 2.680,  train_acc 0.072 -> 0.105     -- descendi
 ```
 
 The model sat at chance for 3,600 steps, began learning around step 4,000, and
-the budget ended 1,600 steps later with the curve still bending. Train accuracy
-(0.105) tracks test (0.103), so it is underfitting — more data would not help,
-more optimization might. Extrapolating the inflection, something like 20k steps
-(~5 h on four CPU cores) would be needed to find out.
+the budget ended 1,600 steps later with the curve still bending — so the reading
+was "give it 20k steps", about five hours of CPU.
 
-That read was too generous, and the follow-up says so. Its implied diagnosis —
+That would have bought nothing. Its implied diagnosis —
 learning began only once cosine decay had cut the LR ~50x below its peak, so the
 LR was too high — was tested directly and **refuted**. Three 1,200-step runs at
 `base_lr` 2e-4, 5e-5 and 1e-5, a 20x span, holding everything else at
@@ -296,12 +317,20 @@ re-derived: the `easy` buffers arrive at std 0.71 with per-buffer std spanning
 embedding has 1.7x the per-token norm of the patch content, which is high but
 within the range ViTs normally tolerate.
 
-**Do not read a method ranking off this preset yet.** The ceiling now learns, but
-it has not been shown to clear the floor through the eval protocol — that is the
-next measurement, and Stage 8 must not run before it. Tuning nine trials on an
-objective that is chance for every configuration is precisely the failure the
-`--data` guard above was added to prevent, and it would arrive at a winner just
-the same.
+With the conv stem the same 5,600-step budget takes `train_acc` from 0.086 to
+**0.720**, final loss 2.773 → 0.682, and `enc_std_mean` *grows* 0.28 → 1.109
+where the linear stem contracted to 0.067. That is the run whose probe scores
+open this section.
+
+One detail worth keeping, because it would mislead a shorter diagnostic: the
+working run also sits at chance for its first ~400 steps, and its `enc_rankme`
+drops to **13.5 by step 800 — lower than the linear stem ever reached** — before
+recovering to 41.0 and climbing. For the first few hundred steps a working
+encoder and a broken one look alike, and briefly the working one looks worse.
+
+**Still do not read a method ranking off this preset.** The gate says the
+instrument works, not that any objective does. Twelve methods have not been run
+here, and `base_lr` for all of them remains an untuned published default.
 
 ### A note on the gitignore incident
 
