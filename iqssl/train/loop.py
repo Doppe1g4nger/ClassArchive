@@ -70,6 +70,20 @@ class TrainConfig:
     max_steps: int | None = None
     """Cap for smoke runs. None means epochs decide."""
 
+    ckpt_every: int = 1000
+    """Steps between checkpoint writes. 0 writes only at the end.
+
+    Durability, not fairness: this cannot change a result, only what survives a
+    process being killed. It is therefore deliberately absent from
+    ``METHOD_TUNABLE`` -- there is no reason a method would want its own value,
+    and the whitelist already refuses one.
+
+    The default exists because this benchmark runs 85-minute jobs on an
+    ephemeral container. A run killed at step 5,000 of 5,600 previously left
+    nothing loadable at all; that happened, and cost 90 minutes of compute plus
+    the evaluation of a *different* run that had already finished.
+    """
+
 
 @dataclass
 class TrainState:
@@ -80,6 +94,41 @@ class TrainState:
     history: list[dict[str, float]] = field(default_factory=list)
     compute: dict[str, float] = field(default_factory=dict)
     final_loss: float = float("nan")
+
+
+def save_checkpoint(
+    out: Path,
+    method: Method,
+    optimizer: torch.optim.Optimizer,
+    pipeline: ViewPipeline,
+    step: int,
+    total_steps: int,
+) -> None:
+    """Write ``checkpoint.pt`` atomically.
+
+    Atomically because the alternative is worse than not checkpointing at all: a
+    process killed partway through ``torch.save`` leaves a truncated file where a
+    valid one used to be, so a periodic write would *destroy* the very thing it
+    exists to protect. Writing to a sibling temp file and renaming means the
+    checkpoint is either the previous complete one or the new complete one.
+
+    ``total_steps`` rides along with ``step`` so a reader can tell a finished run
+    from a salvaged one. ``eval/loading.py`` warns when they disagree; a partial
+    checkpoint should be evaluable, since that is the point of writing it, but it
+    must never be mistaken for a completed run.
+    """
+    tmp = out / "checkpoint.pt.tmp"
+    torch.save(
+        {
+            "method": method.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "pipeline": pipeline.state_dict(),
+            "step": step,
+            "total_steps": total_steps,
+        },
+        tmp,
+    )
+    tmp.replace(out / "checkpoint.pt")
 
 
 def build_loader(
@@ -288,19 +337,16 @@ def train(
             state.final_loss = float(out_.loss.detach())
             state.step += 1
 
+            # After the increment, so the recorded step is the number of steps
+            # *completed*. Skipped at step 0, where there is nothing to save.
+            if out and cfg.ckpt_every and state.step % cfg.ckpt_every == 0:
+                save_checkpoint(out, method, optimizer, pipeline, state.step, total_steps)
+
     state.compute = compute.snapshot()
     state.compute["compute/wall_clock_s"] = time.perf_counter() - t0
 
     if out:
-        torch.save(
-            {
-                "method": method.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "pipeline": pipeline.state_dict(),
-                "step": state.step,
-            },
-            out / "checkpoint.pt",
-        )
+        save_checkpoint(out, method, optimizer, pipeline, state.step, total_steps)
         write_json(out / "summary.json", {"final_loss": state.final_loss, **state.compute})
     if logger:
         logger.close()

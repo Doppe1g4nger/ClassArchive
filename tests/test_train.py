@@ -300,6 +300,48 @@ class TestFairnessContract:
         assert merged.epochs == 10  # the experiment still governs this
 
 
+class TestCheckpointDurability:
+    """A killed run must leave something loadable.
+
+    Written after a container suspension killed a 5,600-step run at step 2,400
+    and left no checkpoint at all -- losing 90 minutes of compute *and* the
+    evaluation of a different run that had already finished.
+    """
+
+    def test_periodic_checkpoint_appears_before_the_run_ends(self, dataset, tmp_path):
+        train(
+            _method("simclr", dataset),
+            dataset,
+            _cfg(max_steps=6, ckpt_every=2),
+            out_dir=tmp_path,
+        )
+        state = torch.load(tmp_path / "checkpoint.pt", map_location="cpu", weights_only=True)
+        assert state["step"] == 6
+        assert state["total_steps"] == 6
+
+    def test_no_temp_file_survives_a_successful_write(self, dataset, tmp_path):
+        """The write is atomic via rename; a leftover .tmp means it was copied
+        into place instead, which reopens the truncation hole it closes."""
+        train(_method("simclr", dataset), dataset, _cfg(max_steps=4), out_dir=tmp_path)
+        assert not (tmp_path / "checkpoint.pt.tmp").exists()
+        assert (tmp_path / "checkpoint.pt").exists()
+
+    def test_ckpt_every_zero_still_writes_at_the_end(self, dataset, tmp_path):
+        train(
+            _method("simclr", dataset),
+            dataset,
+            _cfg(max_steps=4, ckpt_every=0),
+            out_dir=tmp_path,
+        )
+        assert (tmp_path / "checkpoint.pt").exists()
+
+    def test_checkpointing_is_not_a_method_tunable(self):
+        """Durability is not a degree of freedom a method gets to vary."""
+        from iqssl.cli.pretrain import METHOD_TUNABLE
+
+        assert "ckpt_every" not in METHOD_TUNABLE
+
+
 class TestDeviceAndPrecision:
     """GPU-readiness, exercised on CPU.
 

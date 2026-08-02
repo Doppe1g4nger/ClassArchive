@@ -194,6 +194,39 @@ class TestProtocol:
         assert report["finetune_included"] is True
         assert "1" in report["axes"]["emitter"]["finetune"]
 
+    def test_a_partial_checkpoint_is_loadable_but_warns(self, pretrained_run, caplog):
+        """Salvaging a killed run is the point; doing it unknowingly is not.
+
+        A periodic checkpoint from a run that died is deliberately loadable --
+        otherwise 90 minutes of compute is simply lost. But its scores are not
+        comparable with a completed run's, and nothing downstream can tell from
+        the weights alone, so the warning is the only thing standing between a
+        salvaged encoder and a results table that silently mixes the two.
+        """
+        import logging
+
+        import torch
+
+        from iqssl.data.dataset import IQDataset
+        from iqssl.eval.loading import load_encoder
+
+        run_dir, root = pretrained_run
+        ckpt = torch.load(run_dir / "checkpoint.pt", map_location="cpu", weights_only=True)
+        assert ckpt["step"] == ckpt["total_steps"], "fixture run should be complete"
+
+        # Rewrite it as though the run had been killed at 40%.
+        ckpt["step"] = int(0.4 * ckpt["total_steps"])
+        torch.save(ckpt, run_dir / "checkpoint.pt")
+        try:
+            ds = IQDataset(root, "train")
+            with caplog.at_level(logging.WARNING):
+                load_encoder(run_dir, ds.crop_len, ds.num_primary_classes)
+            assert "PARTIAL" in caplog.text
+            assert "not comparable" in caplog.text
+        finally:
+            ckpt["step"] = ckpt["total_steps"]
+            torch.save(ckpt, run_dir / "checkpoint.pt")
+
     def test_hash_mismatch_is_refused(self, pretrained_run, tmp_path):
         run_dir, _ = pretrained_run
         other = tmp_path / "other_ds"

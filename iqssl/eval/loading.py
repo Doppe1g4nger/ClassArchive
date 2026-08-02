@@ -78,6 +78,23 @@ def load_encoder(run_dir: str | Path, crop_len: int, n_classes: int) -> nn.Modul
     state = torch.load(Path(run_dir) / "checkpoint.pt", map_location="cpu", weights_only=True)
     method.load_state_dict(state["method"])
 
+    # A periodic checkpoint from a run that was killed is deliberately loadable
+    # -- salvaging a partial encoder is why the loop writes them. But a number
+    # read off a run that trained 40% of its schedule is not comparable with one
+    # that finished, and nothing downstream can tell from the weights alone. Warn
+    # rather than raise: evaluating a partial run on purpose is legitimate, doing
+    # it by accident is what must not be silent.
+    done, total = state.get("step"), state.get("total_steps")
+    if done is not None and total and done < total:
+        log.warning(
+            "%s is a PARTIAL checkpoint: %d of %d steps (%.0f%%). Its scores are not "
+            "comparable with completed runs and must not be pooled with them.",
+            run_dir,
+            done,
+            total,
+            100 * done / total,
+        )
+
     encoder = method.encoder_for_eval()
     encoder.eval()
     for p in encoder.parameters():
