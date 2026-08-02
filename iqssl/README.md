@@ -169,7 +169,7 @@ reaches 0.150 here, so 2,861 training buffers is the binding constraint.
 
 **Do not read a ceiling-above-floor ordering off smoke runs — there is none, and
 there should not be.** That ordering is a property of `easy` or larger, where it
-now measures 0.746 against 0.159.
+now measures 0.746 against 0.159 under `light`, and 0.770 against 0.159 under `standard`.
 
 One number moved sharply and is worth recording, since it is a property of the
 encoder rather than of any method: **random-feature modulation accuracy roughly
@@ -200,23 +200,54 @@ that? Measured at 5,600 steps × 128 = 717k samples, single seed, `--skip-finetu
 and kNN agrees independently.** The pipeline measures the headline task. Nothing
 here says anything about any SSL method; it says the instrument works.
 
-Two readings that change how the rest should be interpreted:
-
-* **Modulation is nearly solved by untrained features** (`random` 0.727 against
-  the ceiling's 0.794). Emitter identity is the only axis with real
-  discriminating power at this difficulty, so a method that wins on modulation
-  has mostly demonstrated that random features are good.
-* **SNR is not being discarded.** The nuisance ridge shows training strips timing
-  offset (floor 0.462 → ceiling 0.052) and CFO (0.048 → 0.003) as intended, but
-  `snr_db_nominal` only falls 0.610 → **0.490**. Roughly half the ceiling's
-  representation is still explained by signal-to-noise ratio, which emitter
-  identity should not require. That is a live caveat on what the benchmark
-  measures, not a defect in this result.
+**Modulation is nearly solved by untrained features** (`random` 0.727 against the
+ceiling's 0.794), so emitter identity is the only axis here with real
+discriminating power. A method that wins on modulation has mostly demonstrated
+that random features are good.
 
 The floor had to be re-measured, not carried over. It rose from 0.092 to 0.159
 when the encoder changed, because an untrained `PatchStem` produces better random
 features than an untrained linear patch embedding. Reusing the old floor would
 have reported a gap of 0.654 and overstated the result by 11%.
+
+#### It also passes under `standard`, which is what the thesis run uses
+
+`easy_long` runs `augment: light`; `main_comparison` inherits the root default,
+`standard`. Those are different experiments, so the table above did not actually
+validate the configuration the comparison will use — and `policies.py` records
+`renoise` cutting emitter separability from d = 13.3 to d = 3.4, so the
+difference was not hypothetical. Re-run with everything else held fixed:
+
+| | ceiling | floor | gap | ceiling `train_acc` | ceiling `snr` R² |
+| --- | --- | --- | --- | --- | --- |
+| `light` | 0.746 | 0.159 | 0.587 | 0.720 | 0.490 |
+| **`standard`** | **0.770** | **0.159** | **0.611** | 0.596 | 0.416 |
+
+**The gap is wider under the harder policy**, and the floor is identical to three
+decimals on every field — which is the control working: `random` is untrained and
+evaluation reads clean buffers, so the training policy cannot reach it. A
+difference there would have meant leakage between augmentation and eval.
+
+Two predictions failed here, both recorded because the reasoning behind them is
+tempting and wrong:
+
+* **Scaling the probe by the `train_acc` ratio predicted ~0.6.** The ceiling
+  instead *rose* to 0.770 while training accuracy *fell* to 0.596. Stronger
+  augmentation trades fit on the training distribution for transfer, and train
+  accuracy has now failed to predict this gate four separate times.
+* **SNR was expected to fall sharply and did not** — 0.490 → 0.416. The standing
+  hypothesis, untested: `standard`'s `renoise` draws its target SNR from 15–30 dB
+  while `easy`'s own prior is *also* 15–30 dB, and adding noise can only lower a
+  buffer's SNR toward a target, never raise it. So on this preset `renoise`
+  compresses the SNR distribution rather than randomizing it, making it a weak
+  SNR randomizer precisely because its range was calibrated against this dataset.
+  If that is right, the policy and the preset are coupled in a way that would
+  also make `renoise` near-inert on `medium` (0–20 dB) and `hard` (−5–15 dB).
+
+So the earlier reading of "SNR is not being discarded" as a live caveat was
+wrong-headed. The nuisance results track the applied augmentations exactly —
+`light` varies timing and phase and discards them, varies nothing about SNR and
+retains it. The eval was reporting a property of the experiment, correctly.
 
 #### How this failed first, and what the failure taught
 
