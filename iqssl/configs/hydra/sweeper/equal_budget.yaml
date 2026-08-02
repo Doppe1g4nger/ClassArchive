@@ -27,5 +27,16 @@ sampler:
 
 # Per-method spaces live in configs/method/<name>.yaml under `search:` and are
 # passed on the command line by the sweep driver; nothing method-specific
-# belongs in this shared file.
+# belongs in this shared file. The driver *appends* to this (`+hydra.sweeper.
+# params...`), which only works because the key exists here as an empty mapping.
 params: {}
+
+# OptunaSweeper.__init__ takes all nine of its arguments positionally with no
+# defaults, so omitting these two is a TypeError at plugin instantiation rather
+# than a missing-key error anywhere legible. `search_space` is the deprecated
+# predecessor of `params`; `custom_search_space` is a callable hook for spaces
+# that cannot be expressed declaratively. Both are deliberately unused -- the
+# fairness contract wants search spaces that can be read off a config file and
+# compared between methods, not computed.
+search_space: null
+custom_search_space: null

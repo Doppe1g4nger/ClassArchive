@@ -141,7 +141,7 @@ class TestSweepDriver:
         cmd = " ".join(build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy"))
         assert f"hydra.sweeper.n_trials={N_TRIALS}" in cmd
         assert "hydra/sweeper=equal_budget" in cmd
-        assert "hydra.sweeper.params.method.args.temperature" in cmd
+        assert "method.args.temperature" in cmd
         assert "data.root=data/easy" in cmd
 
     def test_search_space_values_survive_hydras_override_parser(self):
@@ -159,20 +159,23 @@ class TestSweepDriver:
         from iqssl.cli.sweep import build_command
 
         cmd = build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy")
-        params = [c for c in cmd if "hydra.sweeper.params." in c]
-        assert params, "no search space reached the command"
+        params = [c for c in cmd if c.startswith("hydra.sweeper.params=")]
+        assert len(params) == 1, f"expected one params override, got {params}"
 
-        parser = OverridesParser.create()
-        for item in params:
-            assert item.startswith("+"), (
-                f"{item!r} must append: equal_budget.yaml ships `params: {{}}`, and "
-                "overriding a key that is not there fails on a struct-mode config"
-            )
-            override = parser.parse_overrides([item])[0]
-            assert not override.is_sweep_override(), (
-                f"{item!r} parses as a sweep over hydra config, which Hydra refuses"
-            )
-            assert isinstance(override.value(), str)
+        override = OverridesParser.create().parse_overrides(params)[0]
+        assert not override.is_sweep_override(), (
+            "parses as a sweep over hydra config, which Hydra refuses outright"
+        )
+
+        value = override.value()
+        assert isinstance(value, dict)
+        # Flat, dotted keys -- not {train: {base_lr: ...}}. The sweeper reads
+        # each key as an override string, so a nested dict makes it try to parse
+        # `train={'base_lr': ...}` and fail in its own grammar.
+        assert "train.base_lr" in value, f"search space is not flat: {dict(value)}"
+        assert all(isinstance(v, str) for v in value.values()), (
+            "space expressions must arrive as strings for the sweeper to parse"
+        )
 
     def test_refuses_to_tune_without_a_named_dataset(self):
         """`hpo` pins no `data:` group, and an experiment that names none composes

@@ -94,21 +94,38 @@ def build_command(
     ]
     if data_root is not None:
         cmd.append(f"data.root={data_root}")
-    # Both the `+` and the quotes are load-bearing, and each was found the hard
-    # way on the first real invocation:
-    #
-    #   * Unquoted, Hydra's override parser reads `tag(log, interval(1e-4,
-    #     1e-2))` as a *sweep expression*, sees the key lives in the `hydra.`
-    #     namespace, and aborts with "Sweeping over Hydra's configuration is not
-    #     supported". Quoted, it stays a string and reaches the Optuna sweeper,
-    #     which is the component meant to parse it.
-    #   * Without `+`, the assignment is an override of an existing key, and
-    #     equal_budget.yaml deliberately ships `params: {}` -- per-method spaces
-    #     belong to the method configs, not the shared budget file. Overriding a
-    #     key that is not there fails on a struct-mode config; appending is the
-    #     correct verb for adding one.
-    cmd += [f'+hydra.sweeper.params.{k}="{v}"' for k, v in space.items()]
+    cmd.append(sweeper_params_override(space))
     return cmd + extra
+
+
+def sweeper_params_override(space: dict[str, str]) -> str:
+    """The search space as one Hydra override, and every character matters.
+
+    The Optuna sweeper wants ``params`` as a *flat* mapping from override string
+    to space expression -- ``{"train.base_lr": "tag(log, interval(...))"}``. Four
+    ways of saying that fail, each differently, and all four were found by
+    running it rather than by reading it:
+
+    * ``hydra.sweeper.params.train.base_lr=tag(log, interval(1e-4, 1e-2))``
+      parses the value as a *sweep expression*, and sweep expressions are
+      refused on ``hydra.*`` keys: "Sweeping over Hydra's configuration is not
+      supported". Quoting the value fixes that.
+    * ``hydra.sweeper.params.train.base_lr="..."`` then fails as an override of
+      a key that does not exist, because equal_budget.yaml ships ``params: {}``.
+    * ``+hydra.sweeper.params.train.base_lr="..."`` appends, but the dotted path
+      builds a *nested* dict, ``{train: {base_lr: ...}}``. The sweeper then tries
+      to parse ``train={'base_lr': ...}`` as an override and dies with "no viable
+      alternative at input '{'base_lr''".
+    * Quoting the key to keep it flat is not available: Hydra's override grammar
+      has no production for a quoted key.
+
+    What works is passing the whole mapping as one dict literal, whose keys may
+    contain dots precisely because they are not a path. Values stay quoted so
+    they arrive as strings; keys must stay *unquoted* or the grammar rejects
+    them.
+    """
+    body = ", ".join(f'{k}: "{v}"' for k, v in space.items())
+    return f"hydra.sweeper.params={{{body}}}"
 
 
 def build_parser() -> argparse.ArgumentParser:
