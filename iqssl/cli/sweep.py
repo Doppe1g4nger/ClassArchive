@@ -94,13 +94,20 @@ def build_command(
     ]
     if data_root is not None:
         cmd.append(f"data.root={data_root}")
-    # The quotes around the value are load-bearing, not style. Unquoted,
-    # Hydra's override parser reads `tag(log, interval(1e-4, 1e-2))` as a *sweep
-    # expression*, sees that the key lives in the `hydra.` namespace, and aborts
-    # with "Sweeping over Hydra's configuration is not supported". Quoted, it
-    # stays an ordinary string and reaches the Optuna sweeper, which is the thing
-    # that is supposed to parse it.
-    cmd += [f'hydra.sweeper.params.{k}="{v}"' for k, v in space.items()]
+    # Both the `+` and the quotes are load-bearing, and each was found the hard
+    # way on the first real invocation:
+    #
+    #   * Unquoted, Hydra's override parser reads `tag(log, interval(1e-4,
+    #     1e-2))` as a *sweep expression*, sees the key lives in the `hydra.`
+    #     namespace, and aborts with "Sweeping over Hydra's configuration is not
+    #     supported". Quoted, it stays a string and reaches the Optuna sweeper,
+    #     which is the component meant to parse it.
+    #   * Without `+`, the assignment is an override of an existing key, and
+    #     equal_budget.yaml deliberately ships `params: {}` -- per-method spaces
+    #     belong to the method configs, not the shared budget file. Overriding a
+    #     key that is not there fails on a struct-mode config; appending is the
+    #     correct verb for adding one.
+    cmd += [f'+hydra.sweeper.params.{k}="{v}"' for k, v in space.items()]
     return cmd + extra
 
 

@@ -159,11 +159,15 @@ class TestSweepDriver:
         from iqssl.cli.sweep import build_command
 
         cmd = build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy")
-        params = [c for c in cmd if c.startswith("hydra.sweeper.params.")]
+        params = [c for c in cmd if "hydra.sweeper.params." in c]
         assert params, "no search space reached the command"
 
         parser = OverridesParser.create()
         for item in params:
+            assert item.startswith("+"), (
+                f"{item!r} must append: equal_budget.yaml ships `params: {{}}`, and "
+                "overriding a key that is not there fails on a struct-mode config"
+            )
             override = parser.parse_overrides([item])[0]
             assert not override.is_sweep_override(), (
                 f"{item!r} parses as a sweep over hydra config, which Hydra refuses"
