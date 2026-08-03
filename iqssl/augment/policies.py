@@ -117,6 +117,19 @@ POLICIES: dict[str, AugmentPolicy] = {
             _op("time_shift", p=0.8, max_samples=4.0),
             _op("sample_rate_offset", p=0.5, max_ppm=30.0),
             _op("multipath", p=0.3, n_taps=2, delay_spread_symbols=0.5),
+            # This range is `easy`'s own SNR prior, and that is not a coincidence
+            # to leave unstated: `renoise` cannot *raise* SNR (you cannot add
+            # negative noise -- see its docstring), so a target above a buffer's
+            # actual SNR barely perturbs it. Matched to `easy`, the op is
+            # meaningfully active. On a lower-SNR preset the target usually sits
+            # above the buffer and the op quietly becomes near-inert, so
+            # `standard` is *weaker* on `medium` and `hard` than it is here.
+            #
+            # A method x difficulty comparison therefore cannot treat the policy
+            # as a constant across rungs, even though the config string is
+            # identical. tests/test_augment.py::TestRenoiseLowersSNR pins both the
+            # asymmetry and this coupling, so moving either the range or `easy`'s
+            # prior fails a test rather than silently changing the experiment.
             _op("renoise", p=0.5, snr_db=(15.0, 30.0)),
         ),
     ),

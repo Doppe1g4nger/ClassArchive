@@ -421,3 +421,61 @@ class TestPipeline:
         assert all(
             torch.equal(a, b) for a, b in zip(p(self._batch(x[:8])).views, expected, strict=True)
         )
+
+
+class TestRenoiseLowersSNR:
+    """`renoise` cannot raise SNR, and that couples the policy to the preset.
+
+    The op's own docstring says it lowers rather than sets -- you cannot add
+    negative noise. What was not written down is the consequence for the
+    difficulty ladder: `standard` samples its target from 15-30 dB, which is
+    exactly `easy`'s own SNR prior, so on lower-SNR presets the target usually
+    sits *above* the buffer and the op barely perturbs it. The augmentation
+    silently weakens as the ladder gets harder, which a method x difficulty
+    comparison must not treat as a constant.
+    """
+
+    @staticmethod
+    def _snr_db(clean: torch.Tensor, noisy: torch.Tensor) -> float:
+        """True SNR of `noisy` measured against the clean reference."""
+        noise = noisy - clean
+        return float(10 * torch.log10(clean.abs().pow(2).mean() / noise.abs().pow(2).mean()))
+
+    def _buffer(self, true_snr_db: float, seed: int = 0):
+        from iqssl.dsp.convert import ri_to_complex
+        from iqssl.dsp.power import add_awgn
+
+        g = torch.Generator().manual_seed(seed)
+        clean = torch.randn(1, 512, generator=g, dtype=torch.cfloat)
+        noisy, _ = add_awgn(clean, true_snr_db, generator=g)
+        return clean, complex_to_ri(noisy), ri_to_complex
+
+    def test_asking_for_a_higher_snr_lowers_it(self):
+        """The property the op is named for. A 5 dB buffer asked for 25 dB comes
+        back *below* 5 dB -- never near the target."""
+        clean, x, to_c = self._buffer(true_snr_db=5.0)
+        g = torch.Generator().manual_seed(1)
+        y = to_c(ops.renoise(x, g, snr_db=(25.0, 25.0)))
+
+        after = self._snr_db(clean, y)
+        assert after < 5.0, f"renoise raised SNR to {after:.2f} dB, which is impossible"
+        assert after > 3.0, f"a 25 dB target should barely perturb a 5 dB buffer, got {after:.2f}"
+
+    def test_asking_for_a_lower_snr_lowers_it_a_lot(self):
+        """The asymmetry: the same op is near-inert above the buffer and
+        aggressive below it, so its strength depends on the preset's SNR prior."""
+        clean, x, to_c = self._buffer(true_snr_db=25.0)
+        g = torch.Generator().manual_seed(1)
+        y = to_c(ops.renoise(x, g, snr_db=(0.0, 0.0)))
+
+        after = self._snr_db(clean, y)
+        assert after < 3.0, f"a 0 dB target on a 25 dB buffer should bite hard, got {after:.2f}"
+
+    def test_standard_policy_range_matches_easys_prior(self):
+        """Pins the coupling rather than leaving it to a comment: if either the
+        policy range or `easy`'s prior moves, this fails and the interaction gets
+        re-examined instead of silently changing."""
+        from iqssl.data.params import PRESETS
+
+        spec = next(s for s in get_policy("standard").specs if s.name == "renoise")
+        assert spec.kwargs["snr_db"] == PRESETS["easy"].channel.snr_db
