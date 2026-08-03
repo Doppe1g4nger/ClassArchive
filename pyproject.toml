@@ -27,7 +27,24 @@ dev = [
     "mypy>=1.11",
 ]
 wandb = ["wandb>=0.17"]
-sweep = ["hydra-optuna-sweeper>=1.2", "hydra-submitit-launcher>=1.2"]
+sweep = [
+    "hydra-optuna-sweeper>=1.2",
+    "hydra-submitit-launcher>=1.2",
+    # Pinned below 2 so Optuna can persist its study, which is what makes a
+    # sweep resumable. optuna 2.10.1 predates SQLAlchemy 2.x and cannot stamp
+    # its schema-version table against it -- every trial then aborts before
+    # starting with a bare AssertionError. optuna itself cannot move, because
+    # hydra-optuna-sweeper pins `optuna>=2.10.0,<3.0.0`, so this is the only end
+    # of the conflict that can. alembic accepts >=1.4.23 and optuna >=1.1.0, and
+    # no code in this project imports sqlalchemy at all -- it arrives purely as
+    # optuna's transitive dependency.
+    #
+    # Without the pin a suspended sweep loses every completed trial: the study
+    # lives in memory, and check_sweep_budget requires all nine trials, so a
+    # partial study cannot legitimately name a winner. That cost 5 trials of
+    # `barlow` once already.
+    "sqlalchemy>=1.4,<2",
+]
 
 [project.scripts]
 iqssl-build-dataset = "iqssl.cli.build_dataset:main"

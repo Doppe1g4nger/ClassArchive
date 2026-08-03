@@ -135,9 +135,14 @@ class TestValProbeObjective:
 
 
 class TestSweepDriver:
-    def test_command_includes_budget_and_space(self):
+    def test_command_includes_budget_and_space(self, monkeypatch, tmp_path):
+        import iqssl.cli.sweep as sweep_mod
         from iqssl.cli.sweep import build_command
 
+        # Point at an empty study DB: the requested trial count is now derived
+        # from what a real sweep has already completed, so without this the test
+        # would pass or fail depending on whether anyone had swept simclr.
+        monkeypatch.setattr(sweep_mod, "STUDY_DB", tmp_path / "none.db")
         cmd = " ".join(build_command("simclr", "hpo", N_TRIALS, [], data_root="data/easy"))
         assert f"hydra.sweeper.n_trials={N_TRIALS}" in cmd
         assert "hydra/sweeper=equal_budget" in cmd
@@ -343,3 +348,64 @@ class TestTunedParamsSurviveTheSweep:
         from iqssl.cli.sweep import save_best_params
 
         assert save_best_params("vicreg", sweep_root=tmp_path, out_dir=tmp_path / "t") is None
+
+
+class TestSweepResumption:
+    """An interrupted sweep must finish its budget, not restart or exceed it.
+
+    A container suspension killed a sweep mid-`barlow` and cost its five
+    completed trials, because Optuna's study lived in memory. Persisting it fixes
+    that -- and introduces a worse bug if left there. Hydra's Optuna sweeper reads
+    `n_trials` as "run this many NEW trials", so re-invoking a nine-trial sweep on
+    a study holding nine runs nine more. A method interrupted once would get 18
+    while its peers got 9: exactly the inequality check_sweep_budget exists to
+    prevent, reintroduced by the fix meant to make interruptions harmless.
+    """
+
+    def _study(self, tmp_path, method: str, n: int):
+        import optuna
+
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        db = tmp_path / "hpo.db"
+        study = optuna.create_study(
+            study_name=method, storage=f"sqlite:///{db}", direction="maximize"
+        )
+        study.optimize(lambda t: t.suggest_float("x", 0.0, 1.0), n_trials=n)
+        return db
+
+    def test_a_fresh_method_runs_the_whole_budget(self, tmp_path):
+        from iqssl.cli.sweep import trials_to_run
+
+        assert trials_to_run("simclr", N_TRIALS, tmp_path / "absent.db") == N_TRIALS
+
+    def test_an_interrupted_sweep_runs_only_the_remainder(self, tmp_path):
+        from iqssl.cli.sweep import trials_to_run
+
+        db = self._study(tmp_path, "byol", 6)
+        assert trials_to_run("byol", N_TRIALS, db) == 3
+
+    def test_a_finished_sweep_runs_nothing_more(self, tmp_path):
+        """The regression that matters: without this, a second invocation on a
+        complete study silently doubles one method's budget."""
+        from iqssl.cli.sweep import trials_to_run
+
+        db = self._study(tmp_path, "mae", N_TRIALS)
+        assert trials_to_run("mae", N_TRIALS, db) == 0
+
+    def test_studies_do_not_pool_across_methods(self, tmp_path):
+        """One database, one study per method. A shared name would merge eleven
+        methods' trials into a single search over incompatible spaces."""
+        from iqssl.cli.sweep import completed_trials
+
+        db = self._study(tmp_path, "vicreg", 4)
+        assert completed_trials("vicreg", db) == 4
+        assert completed_trials("simsiam", db) == 0
+
+    def test_an_unreadable_database_assumes_nothing_was_done(self, tmp_path):
+        """Erring toward re-running: too few trials breaks the contract silently,
+        an unnecessary re-run only costs time."""
+        from iqssl.cli.sweep import trials_to_run
+
+        junk = tmp_path / "corrupt.db"
+        junk.write_bytes(b"not a database")
+        assert trials_to_run("simclr", N_TRIALS, junk) == N_TRIALS

@@ -61,6 +61,8 @@ def build_command(
     """Assemble (and validate) the sweep invocation."""
     cfg = load_cfg(method, experiment, data_root)
 
+    # Validates the *contract* (nine per method); how many still need running
+    # is computed below from what the persisted study already holds.
     check_sweep_budget(n_trials)
     space = check_search_space(cfg)
     if not space:
@@ -89,14 +91,71 @@ def build_command(
         "iqssl.cli.pretrain",
         "--multirun",
         "hydra/sweeper=equal_budget",
-        f"hydra.sweeper.n_trials={n_trials}",
+        f"hydra.sweeper.n_trials={trials_to_run(method, n_trials)}",
         f"method={method}",
         f"experiment={experiment}",
     ]
     if data_root is not None:
         cmd.append(f"data.root={data_root}")
+    # Persist the study so a killed sweep resumes instead of restarting.
+    # equal_budget.yaml ships `storage: null`, which keeps everything in memory
+    # -- and since check_sweep_budget requires all nine trials, a partial study
+    # cannot legitimately name a winner, so an interruption costs the whole
+    # method. A container suspension cost `barlow`'s five completed trials once
+    # already. Needs the sqlalchemy<2 pin in the `sweep` extra; see pyproject.
+    #
+    # One database, one study per method: a shared study_name would pool eleven
+    # methods' trials into one search over incompatible spaces.
+    cmd.append(f"hydra.sweeper.storage=sqlite:///{STUDY_DB}")
+    cmd.append(f"hydra.sweeper.study_name={method}")
     cmd.append(sweeper_params_override(space))
     return cmd + extra
+
+
+def completed_trials(method: str, db: Path | None = None) -> int:
+    """How many trials this method's persisted study already finished."""
+    path = db or STUDY_DB
+    if not path.exists():
+        return 0
+    try:
+        import optuna
+
+        study = optuna.load_study(study_name=method, storage=f"sqlite:///{path}")
+        return sum(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
+    except Exception as exc:
+        # An unreadable or study-less database means "nothing done yet". Running
+        # the full budget is the safe direction: too few trials would break the
+        # contract silently, an unnecessary re-run only costs time.
+        log.warning("could not read study for %s (%s); assuming no completed trials", method, exc)
+        return 0
+
+
+def trials_to_run(method: str, budget: int = N_TRIALS, db: Path | None = None) -> int:
+    """Trials still owed, so an interrupted sweep finishes its budget exactly.
+
+    Persistence alone does *not* give resumption -- it gives accumulation.
+    Hydra's Optuna sweeper reads ``n_trials`` as "run this many **new** trials",
+    so re-invoking a nine-trial sweep on a study that already holds nine runs
+    nine more. A method interrupted once would end up with 14 or 18 trials while
+    every other method got 9, which is exactly the inequality
+    ``check_sweep_budget`` exists to prevent -- reintroduced, and silently, by
+    the very change meant to make interruptions harmless.
+
+    The contract is "nine trials per method", not "nine per invocation". This
+    computes the difference so the two agree however many times a sweep is
+    restarted.
+    """
+    return max(0, budget - completed_trials(method, db))
+
+
+STUDY_DB = Path("outputs_sweep/hpo.db")
+"""Optuna's persisted studies. One file, one study per method.
+
+This is for *resumption*. Recovering the winner for downstream use goes through
+:func:`save_best_params`, which reads run artifacts instead -- deliberately, so
+that a future dependency change cannot strand results the way this one nearly
+did. The two paths answer different questions and neither replaces the other.
+"""
 
 
 TUNED_DIR = Path("results/tuned")
