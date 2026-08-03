@@ -273,3 +273,73 @@ class TestOverridePrecedence:
         from iqssl.cli.pretrain import cli_overridden_train_keys
 
         assert cli_overridden_train_keys() == set()
+
+
+class TestTunedParamsSurviveTheSweep:
+    """Stage 8 has to be able to hand its answer to Stage 9.
+
+    It could not: `equal_budget.yaml` ships `storage: null`, so Optuna's study
+    lives in memory and the winner reaches only stdout. Switching to SQLite makes
+    it worse -- optuna 2.10.1 predates SQLAlchemy 2.x, cannot stamp its
+    schema-version table, and every trial aborts before starting. So the winner
+    is recovered from the artifacts each trial already writes.
+    """
+
+    def _trial(self, root, method, stamp, probe, base_lr):
+        import json
+
+        d = root / method / "seed0" / stamp
+        d.mkdir(parents=True)
+        (d / "val_probe.json").write_text(json.dumps({"val_probe_acc": probe}))
+        (d / "config.json").write_text(
+            json.dumps(
+                {
+                    "train": {
+                        "optimizer": "adamw",
+                        "base_lr": base_lr,
+                        "weight_decay": 1e-4,
+                        "epochs": 3,
+                        "batch_size": 128,
+                    }
+                }
+            )
+        )
+
+    def test_the_highest_scoring_trial_wins(self, tmp_path):
+        from iqssl.cli.sweep import save_best_params
+
+        for stamp, probe, lr in (("a", 0.11, 1e-4), ("b", 0.19, 5e-4), ("c", 0.15, 2e-3)):
+            self._trial(tmp_path, "simclr", stamp, probe, lr)
+
+        got = save_best_params("simclr", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert got["best_value"] == pytest.approx(0.19)
+        assert got["best_params"]["base_lr"] == pytest.approx(5e-4)
+        assert got["n_trials"] == 3
+
+    def test_only_contract_tunable_keys_travel(self, tmp_path):
+        """A trial's config records the whole training block. Carrying `epochs`
+        or `batch_size` into the comparison would buy one method a different
+        schedule -- the exact hole METHOD_TUNABLE exists to close."""
+        from iqssl.cli.sweep import save_best_params
+
+        self._trial(tmp_path, "byol", "a", 0.2, 1e-3)
+        got = save_best_params("byol", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert set(got["best_params"]) <= METHOD_TUNABLE
+        assert "epochs" not in got["best_params"]
+        assert "batch_size" not in got["best_params"]
+
+    def test_the_runner_up_is_recorded(self, tmp_path):
+        """On `supervised` the seven healthy trials spanned 0.009. A winner that
+        close to second place is a selection, not a measurement."""
+        from iqssl.cli.sweep import save_best_params
+
+        self._trial(tmp_path, "mae", "a", 0.140, 1e-4)
+        self._trial(tmp_path, "mae", "b", 0.141, 5e-4)
+        got = save_best_params("mae", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert got["runner_up_value"] == pytest.approx(0.140)
+
+    def test_a_sweep_with_no_completed_trials_returns_none(self, tmp_path):
+        """Rather than inventing a winner from an empty directory."""
+        from iqssl.cli.sweep import save_best_params
+
+        assert save_best_params("vicreg", sweep_root=tmp_path, out_dir=tmp_path / "t") is None
