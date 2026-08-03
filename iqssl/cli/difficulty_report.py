@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from iqssl.data.baselines import (
+    SUB_THRESHOLD_SNR_DB,
     BaselineResult,
     bands_for,
     run_classical_baseline,
@@ -108,16 +109,18 @@ def _evaluate_bands(
     for key, band in bands_for(preset).items():
         if key == "supervised_cnn_high_snr":
             value = by_name["supervised_cnn"].accuracy_high_snr
-        elif key == "supervised_cnn_0db":
-            value = by_name["supervised_cnn"].accuracy_0db
+        elif key == "supervised_cnn_sub_threshold":
+            value = by_name["supervised_cnn"].accuracy_sub_threshold
         else:
             value = by_name[key].accuracy
 
-        # A check with no data to evaluate is *not applicable*, not failed. The
-        # `easy` preset deliberately spans 15-30 dB, so it has no buffers near
-        # 0 dB; reporting that as a failure would tell the user to fix a preset
-        # that is behaving exactly as designed.
-        applicable = not (key == "supervised_cnn_0db" and not _spans_0db(snr_range))
+        # A check with no data to evaluate is *not applicable*, not failed.
+        # `easy` spans 15-30 dB and so has no buffers below the fingerprinting
+        # floor at all; reporting that as a failure would tell the user to fix
+        # a preset behaving exactly as designed.
+        applicable = not (
+            key == "supervised_cnn_sub_threshold" and not _has_sub_threshold(snr_range)
+        )
         if not applicable:
             checks.append(
                 {
@@ -126,7 +129,10 @@ def _evaluate_bands(
                     "band": list(band),
                     "ok": True,
                     "applicable": False,
-                    "advice": f"not applicable: preset SNR range {snr_range} does not span 0 dB",
+                    "advice": (
+                        f"not applicable: preset SNR range {snr_range} is entirely "
+                        f"at or above the {SUB_THRESHOLD_SNR_DB:g} dB fingerprinting floor"
+                    ),
                 }
             )
             continue
@@ -145,8 +151,9 @@ def _evaluate_bands(
     return checks
 
 
-def _spans_0db(snr_range: tuple[float, float], margin: float = 3.0) -> bool:
-    return snr_range[0] <= margin and snr_range[1] >= -margin
+def _has_sub_threshold(snr_range: tuple[float, float]) -> bool:
+    """Does the preset put any buffers below the fingerprinting floor?"""
+    return snr_range[0] < SUB_THRESHOLD_SNR_DB
 
 
 def _advice(
@@ -161,6 +168,19 @@ def _advice(
             "task is too easy: the fingerprint is trivially extractable, so every "
             "SSL method will saturate. Narrow the emitter impairment spreads "
             "(EmitterPrior in iqssl/data/params.py) or widen the channel nuisances."
+        )
+    if key == "supervised_cnn_sub_threshold" and value > band[1]:
+        # The band is an upper bound on purpose. Scoring *well* below the
+        # fingerprinting floor is not good news -- it means emitter identity
+        # survived a channel that should have destroyed it, so the generator
+        # is leaking the label through a path the physics does not allow.
+        return (
+            f"sub-threshold accuracy is {value:.3f}, above the {band[1]:.2f} ceiling. "
+            "Below the fingerprinting floor the emitter label should be gone, so this "
+            "says the generator is leaking identity through something other than the "
+            "hardware impairments -- check that emitter and channel parameters are "
+            "still statistically independent, and that no per-emitter quantity "
+            "survives the noise (a constant DC offset is the usual culprit)."
         )
     if key.startswith("supervised_cnn") and value < band[0]:
         # "The oracle scored too low" has two opposite causes, and the fixes
@@ -208,7 +228,7 @@ def _print_report(report: dict) -> None:
         print(f"  {r['name']:<24} {r['accuracy']:>9.3f}  {r['notes']}")
         if not np.isnan(r["accuracy_high_snr"]):
             print(f"  {'  @ high SNR':<24} {r['accuracy_high_snr']:>9.3f}")
-            print(f"  {'  @ 0 dB':<24} {r['accuracy_0db']:>9.3f}")
+            print(f"  {f'  < {SUB_THRESHOLD_SNR_DB:g} dB':<24} {r['accuracy_sub_threshold']:>9.3f}")
         if not np.isnan(r.get("accuracy_train", float("nan"))):
             print(f"  {'  on train':<24} {r['accuracy_train']:>9.3f}")
     print()

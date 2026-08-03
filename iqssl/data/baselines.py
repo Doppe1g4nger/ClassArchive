@@ -29,13 +29,14 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from iqssl.data.params import FINGERPRINT_SNR_FLOOR_DB
 from iqssl.dsp.convert import ri_to_complex
 
 TARGET_BANDS: dict[str, tuple[float, float]] = {
     "classical": (0.0, 0.60),
     "raw_linear": (0.0, 0.25),
     "supervised_cnn_high_snr": (0.85, 0.95),
-    "supervised_cnn_0db": (0.40, 0.60),
+    "supervised_cnn_sub_threshold": (0.0, 0.35),
 }
 """Default bands, which are `easy`'s. See :data:`PRESET_BANDS`."""
 
@@ -57,13 +58,13 @@ PRESET_BANDS: dict[str, dict[str, tuple[float, float]]] = {
         "classical": (0.0, 0.60),
         "raw_linear": (0.0, 0.25),
         "supervised_cnn_high_snr": (0.40, 0.70),
-        "supervised_cnn_0db": (0.12, 0.45),
+        "supervised_cnn_sub_threshold": (0.0, 0.35),
     },
     "hard": {
         "classical": (0.0, 0.60),
         "raw_linear": (0.0, 0.25),
         "supervised_cnn_high_snr": (0.30, 0.55),
-        "supervised_cnn_0db": (0.10, 0.35),
+        "supervised_cnn_sub_threshold": (0.0, 0.30),
     },
 }
 """Per-rung bands, because a *ladder* cannot be graded against one of its rungs.
@@ -99,7 +100,22 @@ def bands_for(preset: str | None) -> dict[str, tuple[float, float]]:
 
 
 HIGH_SNR_PERCENTILE = 75.0
-ZERO_DB_TOLERANCE = 3.0
+
+SUB_THRESHOLD_SNR_DB = FINGERPRINT_SNR_FLOOR_DB
+"""Buffers below this are scored separately, and are *expected* to score badly.
+
+This replaced a check that measured accuracy within +/-3 dB of 0 dB and demanded
+0.40-0.60 there. That band could not be satisfied by a correct generator: RF
+fingerprinting does not work at 0 dB, so it was asking the simulator to reproduce
+something that does not happen.
+
+Inverting it turns a broken requirement into a validation the project did not
+have. The band is an *upper* bound only: sub-threshold accuracy must be low,
+because the physics says the fingerprint is gone below the knee. If it came back
+high, the generator would be leaking emitter identity through a channel that
+should have destroyed it -- which is exactly the kind of defect the difficulty
+gate exists to catch, and which no other check would notice.
+"""
 
 
 @dataclass
@@ -107,7 +123,7 @@ class BaselineResult:
     name: str
     accuracy: float
     accuracy_high_snr: float = float("nan")
-    accuracy_0db: float = float("nan")
+    accuracy_sub_threshold: float = float("nan")
     accuracy_train: float = float("nan")
     """Training accuracy, reported so a low test score can be diagnosed.
 
@@ -364,12 +380,12 @@ def run_supervised_cnn_baseline(
 
     pred = predict(xte)
     high = snr_te >= np.percentile(snr_te, HIGH_SNR_PERCENTILE)
-    near0 = np.abs(snr_te) <= ZERO_DB_TOLERANCE
+    sub = snr_te < SUB_THRESHOLD_SNR_DB
     return BaselineResult(
         name="supervised_cnn",
         accuracy=_accuracy(pred, yte),
         accuracy_high_snr=_accuracy(pred[high], yte[high]),
-        accuracy_0db=_accuracy(pred[near0], yte[near0]) if near0.any() else float("nan"),
+        accuracy_sub_threshold=(_accuracy(pred[sub], yte[sub]) if sub.any() else float("nan")),
         accuracy_train=_accuracy(predict(xtr), ytr),
         notes=f"SmallCNN, {epochs} epochs, {n_classes} classes",
     )

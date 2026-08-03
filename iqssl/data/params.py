@@ -28,6 +28,26 @@ SAMPLE_RATE_HZ = 1e6
 """Nominal sample rate. Only phase-noise linewidth and Doppler are expressed in
 absolute Hz; everything else is normalized, so this is a labelling convention."""
 
+FINGERPRINT_SNR_FLOOR_DB = 12.0
+"""Below roughly this SNR, RF fingerprinting stops working.
+
+Domain knowledge, not a measurement of this generator. The emitter label lives in
+small amplitude and phase distortions -- IQ imbalance, DC offset, PA compression
+-- and once the noise floor rises to their scale there is nothing left to read.
+Modulation class survives far lower, which is why the two axes diverge.
+
+This is the constraint the difficulty ladder was originally built in violation
+of. `medium` spanned 0-20 dB and `hard` -5-15 dB, so most of their mass sat below
+the floor: the oracle reached 0.436 and 0.149 against a 0.0625 chance line, and
+`hard`'s *best* SNR quartile (10-15 dB) straddled the knee. The ladder was being
+made harder by removing the signal rather than by obscuring it, which is a
+different thing and not the one the benchmark wants to measure.
+
+Difficulty now comes from multipath, which `PRESETS` records as the dominant
+destroyer of the fingerprint, while SNR stays mostly above the floor with a
+deliberate tail below it so the knee itself remains observable.
+"""
+
 ALL_MODULATIONS = (
     "bpsk",
     "qpsk",
@@ -199,13 +219,21 @@ PRESETS: dict[str, Preset] = {
             n_taps_choices=(1,),
         ),
     ),
+    # `medium` and `hard` carry their difficulty in *multipath*, not in SNR.
+    # Their original ranges (0-20 and -5-15) put most of their mass below
+    # FINGERPRINT_SNR_FLOOR_DB, where the emitter label does not survive at all:
+    # gated at 48k training buffers the oracle reached 0.436 and 0.149 against
+    # 0.0625 chance, with train accuracy 1.000 in both cases. The floors below
+    # sit just under the knee so a sub-threshold population still exists to
+    # measure -- that is what `supervised_cnn_sub_threshold` checks -- while the
+    # bulk of each preset stays in the regime where the task is possible.
     "medium": Preset(
         name="medium",
         store_len=1280,
         crop_len=1024,
         n_emitters=16,
         channel=ChannelPrior(
-            snr_db=(0.0, 20.0),
+            snr_db=(10.0, 25.0),
             cfo_norm=(-1e-3, 1e-3),
             sro_ppm=(-40.0, 40.0),
             n_taps_choices=(1, 2, 3),
@@ -217,7 +245,7 @@ PRESETS: dict[str, Preset] = {
         crop_len=1024,
         n_emitters=16,
         channel=ChannelPrior(
-            snr_db=(-5.0, 15.0),
+            snr_db=(8.0, 20.0),
             cfo_norm=(-2e-3, 2e-3),
             sro_ppm=(-60.0, 60.0),
             n_taps_choices=(2, 3, 4),
