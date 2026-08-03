@@ -456,9 +456,40 @@ beyond what is practical, and the cause is multipath rather than sample count.
 The heuristic assumes the impairments are fixed; when a preset is over-specified
 it points at the wrong lever.
 
-**Neither preset should be used for SSL runs until this is resolved**, and the
-resolution is a design decision rather than a bug fix: per-preset bands for
-`medium`, weaker impairments for `hard`, or both.
+#### Resolution: per-rung bands, and `hard` still fails
+
+`PRESET_BANDS` in `data/baselines.py` now gives each rung its own oracle band,
+selected from the dataset's own manifest. Re-checked against the same measured
+numbers:
+
+| preset | oracle @ high SNR | band | | @ 0 dB | band | |
+| --- | --- | --- | --- | --- | --- | --- |
+| `easy` | 0.891 | 0.85–0.95 | **pass** | n/a | — | — |
+| `medium` | 0.436 | 0.40–0.70 | **pass** | 0.145 | 0.12–0.45 | **pass** |
+| `hard` | 0.149 | 0.30–0.55 | **fail** | 0.072 | 0.10–0.35 | **fail** |
+
+The obvious hazard here is circularity — fit each band to what its preset scored
+and the gate certifies everything while meaning nothing. So the *lower* bounds
+are not fitted: they come from `MIN_ORACLE_CHANCE_MULTIPLE = 5`, on the argument
+that twelve methods must be rankable between an untrained floor and the oracle
+ceiling, and a ceiling at 2x chance leaves the whole field inside a few points of
+the floor. At 16 classes that is 0.31, which is why `hard`'s band starts at 0.30
+rather than wherever `hard` happens to land. Only the upper bounds encode intent:
+`easy` nearly solved, `medium` clearly harder, `hard` hardest.
+
+**`hard` therefore still fails, and should.** At 0.149 it is 2.4x chance in its
+*best* SNR quartile. `tests/test_data.py::TestDifficultyBands` pins this: if a
+future edit makes 0.149 pass, the band was widened to fit the preset instead of
+the preset being fixed.
+
+The classical and raw-IQ ceilings deliberately do **not** vary by rung. They ask
+whether the label is cheaply readable without representation learning, and a
+harder channel is no excuse for a task closed-form features can solve.
+
+**`easy` and `medium` are usable for SSL runs. `hard` is not** — it needs weaker
+impairments, and the ablation names the lever: it is the only rung that makes
+multipath mandatory (`n_taps_choices=(2, 3, 4)`, never 1) *and* drops SNR to
+−5 dB, and multipath is the dominant destroyer with low SNR second.
 
 **Sample count is the binding constraint, and diagnosing that took a
 detour worth recording.** At the gate's default 12k training buffers the oracle

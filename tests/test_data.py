@@ -454,3 +454,55 @@ def test_small_cnn_can_overfit_a_tiny_set():
     model.eval()
     with torch.no_grad():
         assert float((model(x).argmax(-1) == y).float().mean()) > 0.95
+
+
+class TestDifficultyBands:
+    """The bands are a ladder's rungs, and must not be fitted to it.
+
+    Grading every preset against `easy`'s 0.85-0.95 failed `medium` and `hard` by
+    construction -- they exist to be harder. The fix is per-rung bands, and the
+    hazard the fix introduces is circularity: fit each band to what its preset
+    happened to score and the gate certifies everything while meaning nothing.
+    """
+
+    def test_every_rung_has_its_own_oracle_band(self):
+        from iqssl.data.baselines import PRESET_BANDS
+
+        highs = {p: b["supervised_cnn_high_snr"] for p, b in PRESET_BANDS.items()}
+        assert highs["easy"] > highs["medium"] > highs["hard"], (
+            f"bands must descend with difficulty, got {highs}"
+        )
+
+    def test_oracle_lower_bounds_come_from_the_chance_rule(self):
+        """Not from whatever each preset measured -- that is the circular version."""
+        from iqssl.data.baselines import MIN_ORACLE_CHANCE_MULTIPLE, PRESET_BANDS
+
+        floor = MIN_ORACLE_CHANCE_MULTIPLE / 16  # 16 emitters on every real rung
+        for preset, bands in PRESET_BANDS.items():
+            lo = bands["supervised_cnn_high_snr"][0]
+            assert lo >= floor - 0.02, (
+                f"{preset}'s oracle band starts at {lo}, below {floor:.3f} = "
+                f"{MIN_ORACLE_CHANCE_MULTIPLE}x chance; a rung that close to chance "
+                "cannot resolve twelve methods"
+            )
+
+    def test_hard_still_fails_its_own_band(self):
+        """The measured 0.149 must not pass. If a future edit makes it pass, the
+        band was widened to fit the preset rather than the preset fixed."""
+        from iqssl.data.baselines import bands_for
+
+        lo, _ = bands_for("hard")["supervised_cnn_high_snr"]
+        assert lo > 0.149, "hard measured 0.149; a band that accepts it is vacuous"
+
+    def test_cheap_readability_ceilings_do_not_vary_by_rung(self):
+        """A harder channel is no excuse for a task closed-form features solve."""
+        from iqssl.data.baselines import PRESET_BANDS
+
+        for key in ("classical", "raw_linear"):
+            assert len({b[key] for b in PRESET_BANDS.values()}) == 1
+
+    def test_unknown_preset_falls_back_to_easy(self):
+        from iqssl.data.baselines import TARGET_BANDS, bands_for
+
+        assert bands_for(None) == TARGET_BANDS
+        assert bands_for("nonesuch") == TARGET_BANDS

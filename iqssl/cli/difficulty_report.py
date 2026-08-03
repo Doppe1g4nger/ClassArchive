@@ -26,12 +26,13 @@ import numpy as np
 import torch
 
 from iqssl.data.baselines import (
-    TARGET_BANDS,
     BaselineResult,
+    bands_for,
     run_classical_baseline,
     run_raw_linear_baseline,
     run_supervised_cnn_baseline,
 )
+from iqssl.data.build import load_manifest
 from iqssl.data.dataset import IQDataset
 from iqssl.utils.logging_ import get_logger, setup_console_logging, write_json
 
@@ -82,7 +83,8 @@ def run_report(
     )
 
     snr_all = np.concatenate([train.snr, test.snr])
-    checks = _evaluate_bands(results, (float(snr_all.min()), float(snr_all.max())))
+    preset = str(load_manifest(root).get("config", {}).get("difficulty") or "")
+    checks = _evaluate_bands(results, (float(snr_all.min()), float(snr_all.max())), preset)
     return {
         "dataset": str(root),
         "dataset_hash": train.dataset_hash,
@@ -95,11 +97,15 @@ def run_report(
     }
 
 
-def _evaluate_bands(results: list[BaselineResult], snr_range: tuple[float, float]) -> list[dict]:
+def _evaluate_bands(
+    results: list[BaselineResult], snr_range: tuple[float, float], preset: str = ""
+) -> list[dict]:
     by_name = {r.name: r for r in results}
     checks = []
 
-    for key, band in TARGET_BANDS.items():
+    # Per-rung, not global: `medium` and `hard` exist to be harder, so grading
+    # them against `easy`'s band failed them by construction. See PRESET_BANDS.
+    for key, band in bands_for(preset).items():
         if key == "supervised_cnn_high_snr":
             value = by_name["supervised_cnn"].accuracy_high_snr
         elif key == "supervised_cnn_0db":

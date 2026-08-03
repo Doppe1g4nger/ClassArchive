@@ -37,6 +37,66 @@ TARGET_BANDS: dict[str, tuple[float, float]] = {
     "supervised_cnn_high_snr": (0.85, 0.95),
     "supervised_cnn_0db": (0.40, 0.60),
 }
+"""Default bands, which are `easy`'s. See :data:`PRESET_BANDS`."""
+
+MIN_ORACLE_CHANCE_MULTIPLE = 5.0
+"""How far above chance the oracle must sit for a rung to be usable.
+
+The lower bound of every oracle band is this rule, not a taste. Twelve methods
+have to be *ranked* between an untrained floor and the oracle ceiling, and on
+`easy` that span is 0.159 to 0.891. Compress it toward chance and the ranking
+stops resolving anything: at 16 classes, an oracle at 2x chance leaves the whole
+field inside a few points of the floor, and the differences reported would be
+seed noise wearing a table.
+"""
+
+PRESET_BANDS: dict[str, dict[str, tuple[float, float]]] = {
+    # `easy` is the certified rung and its bands are the originals, measured.
+    "easy": TARGET_BANDS,
+    "medium": {
+        "classical": (0.0, 0.60),
+        "raw_linear": (0.0, 0.25),
+        "supervised_cnn_high_snr": (0.40, 0.70),
+        "supervised_cnn_0db": (0.12, 0.45),
+    },
+    "hard": {
+        "classical": (0.0, 0.60),
+        "raw_linear": (0.0, 0.25),
+        "supervised_cnn_high_snr": (0.30, 0.55),
+        "supervised_cnn_0db": (0.10, 0.35),
+    },
+}
+"""Per-rung bands, because a *ladder* cannot be graded against one of its rungs.
+
+Applying `easy`'s 0.85-0.95 to every preset is what the gate did originally, and
+it makes `medium` and `hard` fail by construction: they exist to be harder. The
+first real gating of both found exactly that -- `medium` scored 0.436, almost
+precisely `easy`'s 0.891 halved, which is what this project's own ablation
+predicts for switching multipath on (see ``params.py``, "+ 2-tap multipath ...
+roughly halves it"). A preset behaving as designed was being called broken.
+
+The upper bounds encode the ladder's *intent* -- `easy` nearly solved, `medium`
+clearly harder, `hard` hardest -- and the lower bounds all come from
+:data:`MIN_ORACLE_CHANCE_MULTIPLE` at 16 classes (5 x 0.0625 = 0.31), which is
+why `hard` starts at 0.30 rather than wherever `hard` happens to score.
+
+That distinction matters, because the temptation here is circular: fit each band
+to what the preset measured, and the gate certifies everything and means nothing.
+`hard` measures 0.149 and these bands still fail it, which is the point. Widening
+a band to accommodate a preset is how a difficulty ladder quietly becomes a
+difficulty label.
+
+The classical and raw-IQ ceilings do *not* vary by rung. They ask "is the label
+cheaply readable without representation learning?", and the answer must be no at
+every difficulty -- a harder channel is no excuse for a task that closed-form
+features can solve.
+"""
+
+
+def bands_for(preset: str | None) -> dict[str, tuple[float, float]]:
+    """Bands for a named preset, defaulting to `easy`'s for anything unlisted."""
+    return PRESET_BANDS.get(preset or "", TARGET_BANDS)
+
 
 HIGH_SNR_PERCENTILE = 75.0
 ZERO_DB_TOLERANCE = 3.0
