@@ -419,6 +419,47 @@ All three land within about 0.01 of the earlier numbers, and raw-IQ sits at
 chance for 16 emitters, which is the healthy result. That agreement is the main
 evidence that the rewrite is faithful rather than merely self-consistent.
 
+#### `medium` and `hard` do not pass, and they fail differently
+
+Both gated for the first time, at the same 48k training buffers `easy` was
+certified with. Oracle accuracy on emitter id, chance 0.0625:
+
+| preset | overall | @ high SNR | @ 0 dB | on train | band 0.85–0.95 |
+| --- | --- | --- | --- | --- | --- |
+| `easy` | — | **0.891** | n/a | — | pass |
+| `medium` | 0.319 | **0.436** | 0.145 | 1.000 | fail |
+| `hard` | 0.108 | **0.149** | 0.072 | 1.000 | fail |
+
+**These are not the same problem.**
+
+`medium` at 0.436 is a real task — seven times chance, and almost exactly
+`easy`'s 0.891 *halved*, which is what this file's own ablation predicts for
+switching multipath on (`params.py`: "+ 2-tap multipath ... roughly halves it").
+`medium` is the rung where `n_taps_choices` goes from `(1,)` to `(1, 2, 3)`. The
+preset is behaving as designed; what fails is that `TARGET_BANDS` is a single
+global dict applied at `cli/difficulty_report.py:102` with no per-preset keying,
+so every rung is graded against the band measured on `easy`. **A difficulty
+ladder cannot pass a gate calibrated to one of its rungs.**
+
+`hard` at 0.149 is a different matter: barely above the 0.0625 chance line even
+in its top SNR quartile. No choice of band rescues that, because there is almost
+no signal left to measure — method rankings there really would be noise, which is
+what the gate exists to prevent. `hard` turns multipath from optional to
+guaranteed (`n_taps_choices=(2, 3, 4)`, never 1), widens delay spread to 2.5
+symbols and drops SNR to −5 dB, and the ablation says multipath dominates and low
+SNR is second. It is over-specified on both.
+
+The gate's own advice — "DATA-limited, raise `--n-train`" — is locally correct
+(train accuracy is 1.000) but misleading here. Quadrupling the data took `medium`
+from 0.225 to 0.436, so reaching 0.85 by that route would need a dataset far
+beyond what is practical, and the cause is multipath rather than sample count.
+The heuristic assumes the impairments are fixed; when a preset is over-specified
+it points at the wrong lever.
+
+**Neither preset should be used for SSL runs until this is resolved**, and the
+resolution is a design decision rather than a bug fix: per-preset bands for
+`medium`, weaker impairments for `hard`, or both.
+
 **Sample count is the binding constraint, and diagnosing that took a
 detour worth recording.** At the gate's default 12k training buffers the oracle
 reached only 0.785, and *both* obvious fixes point the wrong way: train accuracy
