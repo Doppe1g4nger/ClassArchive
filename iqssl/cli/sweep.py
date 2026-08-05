@@ -166,7 +166,34 @@ TUNABLE_KEYS = ("optimizer", "base_lr", "weight_decay")
 
 The same three ``METHOD_TUNABLE`` permits. Anything else a trial happened to
 record is held constant by the fairness contract and must not travel.
+
+Method-specific coefficients travel too, but separately -- see
+:func:`_searched_method_args`. They are not in this tuple because they are not
+``train.*`` keys and are not shared across methods.
 """
+
+
+def _searched_method_args(full: DictConfig) -> dict[str, Any]:
+    """The method arguments this trial's search space actually tuned.
+
+    A sweep tunes more than the learning rate. SupCon searches ``temperature``,
+    MAE and TS-JEPA search ``mask_ratio``, and the winning trial's value for
+    those is part of what won. Recovering only ``train.*`` would hand the
+    comparison the tuned learning rate beside the *published* coefficient --
+    a configuration no trial ever ran, and therefore one with no evidence behind
+    it at all. On `supcon` that is not hypothetical: the winner used
+    ``temperature`` 0.056 against a published 0.1.
+
+    Filtered by the declared search space rather than taken wholesale, so the
+    file records what tuning chose and not the untuned defaults it sat beside.
+    ``check_search_space`` has already refused any key that is not a real
+    constructor argument of this method, so the space is a safe filter.
+    """
+    search = full.get("method", {}).get("search") or {}
+    args = full.get("method", {}).get("args") or {}
+    prefix = "method.args."
+    keys = [k[len(prefix) :] for k in search if k.startswith(prefix)]
+    return {k: OmegaConf.to_object(args)[k] for k in keys if k in args}  # type: ignore[index]
 
 
 def save_best_params(
@@ -198,10 +225,20 @@ def save_best_params(
         if score is None:
             continue
         train = cfg.get("train", {})
+        # config.json records `train` but not `method.args`, so the tuned
+        # coefficients come from the full config snapshot beside it. Absent for
+        # runs predating that snapshot; those still yield their train params.
+        full_path = run / "config_full.yaml"
+        method_args = (
+            _searched_method_args(OmegaConf.load(full_path))  # type: ignore[arg-type]
+            if full_path.exists()
+            else {}
+        )
         trials.append(
             {
                 "val_probe_acc": float(score),
                 "params": {k: train[k] for k in TUNABLE_KEYS if k in train},
+                "method_args": method_args,
                 "run": str(run),
             }
         )
@@ -217,6 +254,7 @@ def save_best_params(
     payload = {
         "method": method,
         "best_params": best["params"],
+        "best_method_args": best["method_args"],
         "best_value": best["val_probe_acc"],
         "best_run": best["run"],
         "n_trials": len(trials),
@@ -237,6 +275,62 @@ def save_best_params(
         len(trials),
     )
     return payload
+
+
+def tuned_overrides(
+    method: str, tuned_dir: Path = TUNED_DIR, *, required: bool = True
+) -> list[str]:
+    """The banked winner for ``method``, as Hydra command-line overrides.
+
+    This is the half of tuning that turns it from a number in a file into an
+    experiment. Without it `results/tuned/` is write-only: the comparison
+    composes each method's *published* defaults from its yaml, every run looks
+    healthy, every table renders, and the claim "tuned per method on an equal
+    budget" is simply false. On `supcon` that would have meant base_lr 0.3
+    instead of 0.686 and temperature 0.1 instead of 0.056 -- 2.3x off on one
+    axis and 1.8x on the other, with nothing anywhere reporting a problem.
+
+    Missing files raise rather than falling back, for the same reason. A silent
+    fallback is indistinguishable from success in every artifact the run
+    produces, and the fallback is precisely the untuned configuration the
+    comparison exists to avoid. Pass ``required=False`` only where an untuned
+    baseline is the intent -- `random` has no search space and never sweeps.
+
+    Overrides, not a merged config, because the command line is the top of
+    `merge_train_config`'s precedence chain. Anything below it can be quietly
+    overwritten by a method's own ``train:`` block -- which is exactly the bug
+    that silently ran all nine trials of every early sweep at the static
+    published learning rate.
+    """
+    path = tuned_dir / f"{method}.json"
+    if not path.exists():
+        if required:
+            raise FileNotFoundError(
+                f"no tuned parameters for {method!r} at {path}. Run "
+                f"`iqssl-sweep --method {method}` first, or pass required=False to "
+                f"run it at its published defaults -- but then it is untuned, and "
+                f"no table may describe it otherwise."
+            )
+        log.warning("no tuned parameters for %s; using published defaults", method)
+        return []
+
+    payload = read_json(path)
+    overrides = [f"train.{k}={_override_value(v)}" for k, v in payload["best_params"].items()]
+    overrides += [
+        f"method.args.{k}={_override_value(v)}"
+        for k, v in (payload.get("best_method_args") or {}).items()
+    ]
+    return overrides
+
+
+def _override_value(v: Any) -> str:
+    """Render a value so Hydra's parser reads back exactly what was tuned.
+
+    `repr` on a float, not `str` or a format spec: `1.94e-07` must survive with
+    every digit, and a rounded learning rate is a different experiment from the
+    one the sweep selected.
+    """
+    return repr(v) if isinstance(v, float) else str(v)
 
 
 def sweeper_params_override(space: dict[str, str]) -> str:

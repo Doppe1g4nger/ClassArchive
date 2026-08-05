@@ -349,6 +349,127 @@ class TestTunedParamsSurviveTheSweep:
 
         assert save_best_params("vicreg", sweep_root=tmp_path, out_dir=tmp_path / "t") is None
 
+    def _full_cfg(self, root, method, stamp, args, search):
+        from omegaconf import OmegaConf
+
+        d = root / method / "seed0" / stamp
+        OmegaConf.save(
+            OmegaConf.create({"method": {"name": method, "args": args, "search": search}}),
+            d / "config_full.yaml",
+        )
+
+    def test_tuned_method_coefficients_travel_too(self, tmp_path):
+        """The sweep tunes more than the learning rate. Recovering only `train.*`
+        pairs the tuned lr with the *published* coefficient -- a configuration no
+        trial ever ran. On `supcon` the winner used temperature 0.056 against a
+        published 0.1."""
+        from iqssl.cli.sweep import save_best_params
+
+        self._trial(tmp_path, "supcon", "a", 0.11, 1e-4)
+        self._full_cfg(
+            tmp_path,
+            "supcon",
+            "a",
+            {"temperature": 0.056, "proj_dim": 128},
+            {"method.args.temperature": "interval(0.05, 0.5)"},
+        )
+        got = save_best_params("supcon", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert got["best_method_args"] == {"temperature": pytest.approx(0.056)}
+
+    def test_arguments_the_sweep_never_searched_do_not_travel(self, tmp_path):
+        """`proj_dim` above is a held-constant architectural choice that merely
+        sits in the same block. The file must record what tuning chose, not the
+        defaults it sat beside."""
+        from iqssl.cli.sweep import save_best_params
+
+        self._trial(tmp_path, "supcon", "a", 0.11, 1e-4)
+        self._full_cfg(
+            tmp_path,
+            "supcon",
+            "a",
+            {"temperature": 0.056, "proj_dim": 128},
+            {"method.args.temperature": "interval(0.05, 0.5)"},
+        )
+        got = save_best_params("supcon", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert "proj_dim" not in got["best_method_args"]
+
+    def test_a_trial_without_a_full_snapshot_still_yields_its_train_params(self, tmp_path):
+        """config_full.yaml postdates the earliest sweeps. Those runs are still
+        recoverable -- with no coefficients, which is what they have."""
+        from iqssl.cli.sweep import save_best_params
+
+        self._trial(tmp_path, "simclr", "a", 0.11, 1e-4)
+        got = save_best_params("simclr", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert got["best_method_args"] == {}
+        assert got["best_params"]["base_lr"] == pytest.approx(1e-4)
+
+
+class TestTunedParametersReachTheComparison:
+    """`results/tuned/` was write-only, and that is invisible from every artifact.
+
+    A comparison that never loads these files composes each method's published
+    defaults instead. Every run succeeds, every table renders, and the claim
+    "tuned per method on an equal budget" is false. On `supcon` it would have
+    meant base_lr 0.3 rather than 0.686 and temperature 0.1 rather than 0.056.
+    """
+
+    def _bank(self, tmp_path, method, params, args=None):
+        import json
+
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f"{method}.json").write_text(
+            json.dumps({"best_params": params, "best_method_args": args or {}})
+        )
+
+    def test_train_and_method_values_both_become_overrides(self, tmp_path):
+        from iqssl.cli.sweep import tuned_overrides
+
+        self._bank(tmp_path, "supcon", {"base_lr": 0.5, "optimizer": "lars"}, {"temperature": 0.06})
+        got = tuned_overrides("supcon", tuned_dir=tmp_path)
+        assert "train.base_lr=0.5" in got
+        assert "train.optimizer=lars" in got
+        assert "method.args.temperature=0.06" in got
+
+    def test_small_exponents_survive_the_round_trip(self, tmp_path):
+        """A rounded weight decay is a different experiment from the one the
+        sweep selected; `1.94e-07` must arrive with every digit."""
+        from iqssl.cli.sweep import tuned_overrides
+
+        self._bank(tmp_path, "byol", {"weight_decay": 1.9404819843699845e-07})
+        (override,) = tuned_overrides("byol", tuned_dir=tmp_path)
+        assert float(override.split("=")[1]) == 1.9404819843699845e-07
+
+    def test_a_missing_winner_is_refused_rather_than_defaulted(self, tmp_path):
+        """The fallback *is* the untuned configuration the comparison exists to
+        avoid, and it leaves no trace anywhere in the run."""
+        from iqssl.cli.sweep import tuned_overrides
+
+        with pytest.raises(FileNotFoundError, match="no tuned parameters"):
+            tuned_overrides("simclr", tuned_dir=tmp_path)
+
+    def test_an_untuned_method_may_opt_out_explicitly(self, tmp_path):
+        """`random` declares no search space and never sweeps, so it has no
+        winner to load and legitimately runs at its defaults."""
+        from iqssl.cli.sweep import tuned_overrides
+
+        assert tuned_overrides("random", tuned_dir=tmp_path, required=False) == []
+
+    def test_every_banked_winner_parses_as_hydra_overrides(self):
+        """Against the real files on disk, so a malformed bank cannot reach a
+        51-hour comparison. Skipped where tuning has not run."""
+        from hydra.core.override_parser.overrides_parser import OverridesParser
+
+        from iqssl.cli.sweep import TUNED_DIR, tuned_overrides
+
+        banked = sorted(p.stem for p in TUNED_DIR.glob("*.json")) if TUNED_DIR.exists() else []
+        if not banked:
+            pytest.skip("no sweeps have been banked in this checkout")
+        parser = OverridesParser.create()
+        for method in banked:
+            overrides = tuned_overrides(method)
+            assert overrides, f"{method} banked an empty override list"
+            parser.parse_overrides(overrides)
+
 
 class TestSweepResumption:
     """An interrupted sweep must finish its budget, not restart or exceed it.
