@@ -124,6 +124,64 @@ for every method, and a `search:` block may only reach for `base_lr`,
 `merge_train_config` closes for static config, which a search space could
 otherwise walk through by tuning `train.epochs`.
 
+Enforcement extends to *selection*, for a reason that is not obvious: a sweep
+killed partway leaves its run directories behind, and the sweep that replaces it
+writes alongside them. `barlow` accumulated 14 directories for a nine-trial
+budget, and picking the best of all 14 gives one method a wider search than the
+rest — the same violation `check_sweep_budget` refuses on the command line, but
+invisible, because every file on disk looks legitimate. `save_best_params`
+selects from the newest `N_TRIALS` and records `n_trial_dirs_seen` when they
+differ.
+
+#### What tuning measured, and what it did not
+
+All eleven trainable methods, nine trials each, on `easy` at the 400-step tuning
+budget. Selected on `val_probe_acc`; chance is 0.0625:
+
+| method | opt | `base_lr` | val probe | gap to runner-up |
+| --- | --- | --- | --- | --- |
+| `supcon` | lars | 0.686 | 0.1646 | +0.0009 |
+| `supervised` | adamw | 0.00103 | 0.1415 | +0.0031 |
+| `simsiam` | sgd | 0.0128 | 0.1359 | +0.0001 |
+| `barlow` | lars | 0.185 | 0.1314 | +0.0055 |
+| `byol` | lars | 0.0576 | 0.1287 | +0.0010 |
+| `tsjepa` | adamw | 0.000291 | 0.1285 | +0.0005 |
+| `ijepa` | adamw | 0.000124 | 0.1264 | +0.0003 |
+| `simclr` | lars | 0.0531 | 0.1251 | +0.0005 |
+| `vicreg` | lars | 0.0543 | 0.1233 | +0.0001 |
+| `data2vec` | adamw | 0.000106 | 0.1230 | +0.0015 |
+| `mae` | adamw | 0.00139 | 0.1089 | +0.0035 |
+
+**Read this as a fairness guarantee and nothing more.** Every method got the same
+nine trials on the same objective, which is what makes the comparison legitimate.
+It does *not* establish that any method is running at its best hyperparameters.
+Eight of the eleven gaps are under 0.002. The probe scores 8,000 validation
+buffers (`VAL_PROBE_CAP`), so one prediction is worth 0.000125: `simsiam` and
+`vicreg` beat their runners-up by **a single buffer**, and five more methods by
+fewer than a dozen. Even `barlow`'s largest-in-the-field +0.0055 is 44 buffers.
+The 400-step budget
+**rejects** bad configurations reliably (`supervised` had two outright collapses
+at `rankme` ≈ 6) and **ranks** good ones essentially not at all. Any claim that a
+method's score reflects *its* best configuration is unsupported by this data.
+
+Two orderings are worth carrying forward, neither of them a result:
+
+- The ten unsupervised methods span 0.1089–0.1646. If the full comparison at
+  5,600 steps reproduces that compression, the honest conclusion is that the
+  budget cannot separate these methods — not that the methods are equivalent.
+- `mae` is last, below every joint-embedding method. That is the known
+  masked-autoencoder artifact: they linear-probe poorly and finetune well. It is
+  the first evidence in this project that the concern is live, and it is why the
+  headline table must not be read off the probe column alone.
+
+Tuned values are banked to `results/tuned/<method>.json` and reach the comparison
+through `tuned_overrides()`. That function is load-bearing: without it the files
+are write-only, the comparison composes each method's *published* defaults, every
+run succeeds, every table renders, and "tuned per method on an equal budget" is
+simply false. It carries the tuned method coefficients too — the sweeps search
+`temperature`, `mask_ratio`, `lambd` and VICReg's two loss weights, and every one
+of the eleven winners set at least one of them away from its published value.
+
 ### Aggregation refuses to pool incomparable runs
 
 `iqssl-aggregate --root <dir> --out <dir>` produces the tables and figures. Its
@@ -486,10 +544,71 @@ The classical and raw-IQ ceilings deliberately do **not** vary by rung. They ask
 whether the label is cheaply readable without representation learning, and a
 harder channel is no excuse for a task closed-form features can solve.
 
-**`easy` and `medium` are usable for SSL runs. `hard` is not** — it needs weaker
-impairments, and the ablation names the lever: it is the only rung that makes
-multipath mandatory (`n_taps_choices=(2, 3, 4)`, never 1) *and* drops SNR to
-−5 dB, and multipath is the dominant destroyer with low SNR second.
+#### Resolution: the ladder rebuilt around the 12 dB floor — all three now pass
+
+The diagnosis above was right that `hard` was over-specified and wrong about the
+lever. It named multipath. The binding constraint was SNR, and the reason is a
+fact about the task rather than about this simulator: **RF fingerprinting only
+works well at roughly 12 dB and above.** `hard` ran down to −5 dB and `medium` to
+0 dB, so both spent most of their buffers in a regime where the fingerprint is
+physically absent — asking the oracle to learn something that is not there.
+
+`FINGERPRINT_SNR_FLOOR_DB = 12.0` now anchors the ladder, and the presets were
+rebuilt around it: `easy` 15–30 dB, `medium` 10–25, `hard` 8–20. Re-gated at the
+48k training buffers `easy` was certified with:
+
+| preset | classical | raw-IQ | oracle @ high SNR | band | < 12 dB | result |
+| --- | --- | --- | --- | --- | --- | --- |
+| `easy` | 0.195 | 0.062 | **0.891** | 0.85–0.95 | n/a | **PASS** |
+| `medium` | 0.106 | 0.066 | **0.549** | 0.40–0.70 | n/a | **PASS** |
+| `hard` | 0.085 | 0.058 | **0.307** | 0.30–0.55 | 0.174 | **PASS** |
+
+**`hard` passes by 0.007.** Its band starts at 0.30 because that is
+`MIN_ORACLE_CHANCE_MULTIPLE = 5` at 16 classes, not because `hard` scores 0.307.
+It is genuinely usable and genuinely marginal, and a seed change could put it
+under. Treat a `hard` result as the rung that most needs its error bars read.
+
+##### Why `medium`'s sub-threshold check reads n/a rather than pass
+
+The sub-threshold check is the ladder's only defence against the generator
+leaking emitter identity through a channel that should have destroyed it. On the
+rebuilt `medium` it *failed*, at 0.411 against a 0.35 ceiling, and the advice it
+printed said exactly that. It was wrong, and the two measurements that show it
+are worth keeping:
+
+- Emitter identity recovered from **DC offset alone** — the mechanism the advice
+  names — scores 0.0825 on `medium`'s lowest-SNR slice against chance 0.0625.
+  No per-emitter constant survives the noise.
+- A leak is SNR-*independent*, so it appears as a **floor**: a level accuracy
+  stops falling below. Binned oracle accuracy has none in either preset.
+
+| SNR band | 7–9 | 9–11 | 11–13 | 13–15 | 15–17 | 17–19 | 21–23 | 23–25 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `hard` | 0.139 | 0.176 | 0.220 | 0.196 | 0.282 | 0.314 | — | — |
+| `medium` | — | 0.397 | 0.427 | 0.489 | 0.478 | 0.496 | 0.514 | 0.582 |
+
+`hard`'s lowest bin is its lowest value, still falling at 7–9 dB. `medium`
+crosses the 12 dB floor with no discontinuity at all. Both come from the same
+generator code, so `hard` tests this property for the whole ladder and passes.
+
+What actually failed was the check's premise. It assumes the fingerprint is
+*gone* below the floor, which holds well below the knee and not at it — and
+`medium` spans 9.6–25.3 dB, so its entire sub-threshold population is a 2.4 dB
+sliver hugging the floor from underneath, where the fingerprint should be
+*degraded* rather than absent. Grading that against a ceiling meant for buffers
+far below the knee fails a preset behaving as designed: the same error, one level
+down, as grading `medium` against `easy`'s oracle band.
+
+So `SUB_THRESHOLD_MARGIN_DB = 3.0` now makes the check *not applicable* unless a
+preset reaches that far below the floor. Three decibels is a halving of
+signal-to-noise power — a stated convention, not a measurement, and it does fall
+between `medium`'s 2.4 dB and `hard`'s 4.4 dB. The honest cost is that the
+ladder's leak check now rests on `hard` alone, so a test asserts that some rung
+still runs it and a future SNR edit cannot silently disarm it. The alternative
+was widening `medium`'s ceiling past the number it exists to judge, and a band
+fitted to what it grades certifies everything while meaning nothing.
+
+**All three rungs are usable for SSL runs**, with `hard`'s margin read above.
 
 **Sample count is the binding constraint, and diagnosing that took a
 detour worth recording.** At the gate's default 12k training buffers the oracle
@@ -513,13 +632,14 @@ Two changes were made before that diagnostic existed:
   second-order statistics its own classical floor uses, not because it closed
   the gap — it did not.
 
-`medium` and `hard` have **not** been verified against the gate. Do that before
-trusting any result from them, and start from 48k training buffers, since both
-are strictly harder than `easy`:
+`medium` and `hard` have both since been rebuilt around the 12 dB floor and
+gated at 48k training buffers; all three rungs pass. Re-verify after any change
+to a prior, and always at 48k rather than the 12k default, since the bands were
+calibrated at the larger size:
 
 ```bash
-iqssl-build-dataset --out data/synth_v1 --difficulty medium --n-samples 200000
-iqssl-difficulty-report --data data/synth_v1 --n-train 48000
+iqssl-build-dataset --out data/medium --difficulty medium --n-samples 120000
+iqssl-difficulty-report --data data/medium --n-train 48000
 ```
 
 If a preset lands outside its bands, read the train accuracy first. When the
