@@ -342,6 +342,62 @@ class TestCheckpointDurability:
         assert "ckpt_every" not in METHOD_TUNABLE
 
 
+class TestTuningTrialsWriteNoCheckpoints:
+    """The other half of durability: a trial's weights are cost with no benefit.
+
+    Nothing in the project loads an HPO checkpoint -- the objective is read off
+    the in-memory encoder and `save_best_params` uses val_probe.json plus
+    config.json. At ~840 MB a trial for the 8192-d projector methods, writing
+    them anyway exhausted the disk partway through a sweep. What is pinned here
+    is that suppression follows `val_probe` and nothing else, because the
+    failure it prevents is silent in both directions: a sweep that fills the
+    disk dies hours in, and a *normal* run wrongly caught by this guard would
+    finish looking perfectly healthy and leave nothing to evaluate.
+    """
+
+    def test_suppressed_run_writes_no_checkpoint(self, dataset, tmp_path):
+        train(
+            _method("simclr", dataset),
+            dataset,
+            _cfg(max_steps=4, ckpt_every=2, write_checkpoints=False),
+            out_dir=tmp_path,
+        )
+        assert not (tmp_path / "checkpoint.pt").exists()
+        assert not (tmp_path / "checkpoint.pt.tmp").exists()
+
+    def test_the_rest_of_the_run_directory_is_unaffected(self, dataset, tmp_path):
+        """Only the weights go. summary.json is what the aggregator reads for
+        compute accounting, and it is kilobytes."""
+        train(
+            _method("simclr", dataset),
+            dataset,
+            _cfg(max_steps=4, write_checkpoints=False),
+            out_dir=tmp_path,
+        )
+        assert (tmp_path / "summary.json").exists()
+
+    def test_hpo_suppresses_and_smoke_does_not(self):
+        """Against the configs as shipped, so the wiring cannot rot."""
+        from hydra import compose, initialize_config_dir
+
+        from iqssl.cli.pretrain import CONFIG_DIR, writes_checkpoints
+
+        with initialize_config_dir(version_base=None, config_dir=str(CONFIG_DIR)):
+            hpo = compose(config_name="pretrain", overrides=["experiment=hpo"])
+            smoke = compose(config_name="pretrain", overrides=["experiment=smoke_cpu"])
+        assert not writes_checkpoints(hpo)
+        assert writes_checkpoints(smoke)
+
+    def test_a_config_with_no_val_probe_key_still_checkpoints(self):
+        """`.get(..., False)` on a missing key, not an AttributeError: methods
+        and experiments are composed from many files and most never mention it."""
+        from omegaconf import OmegaConf
+
+        from iqssl.cli.pretrain import writes_checkpoints
+
+        assert writes_checkpoints(OmegaConf.create({"train": {}}))
+
+
 class TestDeviceAndPrecision:
     """GPU-readiness, exercised on CPU.
 

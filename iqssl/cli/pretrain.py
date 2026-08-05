@@ -128,6 +128,26 @@ def merge_train_config(cfg: DictConfig, cli_overrides: set[str] | None = None) -
     return TrainConfig(**{**base, **applied})
 
 
+def writes_checkpoints(cfg: DictConfig) -> bool:
+    """Should this run persist weights? Every run except a tuning trial.
+
+    A trial's checkpoint has no reader anywhere in the project. The objective is
+    computed from the in-memory encoder the moment training returns, and
+    `save_best_params` reconstructs the winner from val_probe.json and
+    config.json -- it never opens a `.pt` file. The writes are pure cost: ~840 MB
+    per trial for the methods with an 8192-d projector, so a nine-trial sweep
+    buries ~7.5 GB, and two such methods back to back will exhaust the disk
+    mid-sweep. That happened, and was papered over with a cron job that deleted
+    the files every twenty minutes; this is the cause rather than the symptom.
+
+    Keyed on ``val_probe`` and not on the experiment's *name* because that flag
+    is what makes a run a trial: it is what causes `main()` to return a probe
+    score for the sweeper to maximize instead of a loss. Any future tuning
+    experiment inherits this for free, and no ordinary run can trip it.
+    """
+    return not bool(cfg.get("val_probe", False))
+
+
 N_TRIALS = 9
 """The equal tuning budget, per the fairness contract.
 
@@ -257,6 +277,7 @@ def main(cfg: DictConfig) -> float:
         cfg, dataset.crop_len, seed=cfg.train.seed, n_classes=dataset.num_primary_classes
     )
     train_cfg = merge_train_config(cfg)
+    train_cfg.write_checkpoints = writes_checkpoints(cfg)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     out = Path(cfg.output_root) / cfg.experiment / cfg.method.name / f"seed{cfg.train.seed}" / stamp

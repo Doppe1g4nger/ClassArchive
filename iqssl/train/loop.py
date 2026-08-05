@@ -84,6 +84,22 @@ class TrainConfig:
     the evaluation of a *different* run that had already finished.
     """
 
+    write_checkpoints: bool = True
+    """Whether to write ``checkpoint.pt`` at all. Off for tuning trials.
+
+    An HPO trial's checkpoint is write-only. ``save_best_params`` reads
+    ``val_probe.json`` and ``config.json``; the probe itself scores the
+    in-memory encoder, and nothing ever loads the weights again. For a method
+    with an 8192-d projector each write is ~840 MB, so a nine-trial sweep buries
+    ~7.5 GB of files no reader exists for -- enough to exhaust the disk partway
+    through a sweep, which is how this was found.
+
+    Like ``ckpt_every`` this is durability, not fairness: it changes what
+    survives the process, never what the process computes. ``iqssl-pretrain``
+    clears it whenever ``val_probe`` is set, since that flag is precisely what
+    marks a run as a tuning trial.
+    """
+
 
 @dataclass
 class TrainState:
@@ -339,14 +355,20 @@ def train(
 
             # After the increment, so the recorded step is the number of steps
             # *completed*. Skipped at step 0, where there is nothing to save.
-            if out and cfg.ckpt_every and state.step % cfg.ckpt_every == 0:
+            if (
+                out
+                and cfg.write_checkpoints
+                and cfg.ckpt_every
+                and state.step % cfg.ckpt_every == 0
+            ):
                 save_checkpoint(out, method, optimizer, pipeline, state.step, total_steps)
 
     state.compute = compute.snapshot()
     state.compute["compute/wall_clock_s"] = time.perf_counter() - t0
 
     if out:
-        save_checkpoint(out, method, optimizer, pipeline, state.step, total_steps)
+        if cfg.write_checkpoints:
+            save_checkpoint(out, method, optimizer, pipeline, state.step, total_steps)
         write_json(out / "summary.json", {"final_loss": state.final_loss, **state.compute})
     if logger:
         logger.close()
