@@ -249,6 +249,30 @@ def save_best_params(
         )
         return None
 
+    # Artifacts can outnumber the budget, because a sweep that dies leaves its
+    # run directories behind and the replacement sweep writes alongside them.
+    # `barlow` accumulated 14 that way. Selecting from all of them would hand one
+    # method a wider search than the contract allows, which is the precise thing
+    # check_sweep_budget exists to prevent -- and unlike a bad budget on the
+    # command line, this version is invisible: every file looks legitimate.
+    #
+    # The newest N_TRIALS are the live study's, since the orphans necessarily
+    # predate the sweep that replaced them. Sorted by run directory, whose names
+    # are timestamps, so the ordering is chronological rather than filesystem.
+    n_seen = len(trials)
+    if n_seen > N_TRIALS:
+        trials.sort(key=lambda t: t["run"])
+        trials = trials[-N_TRIALS:]
+        log.warning(
+            "%s left %d trial directories for a %d-trial budget; selecting from the "
+            "newest %d and ignoring %d orphaned by an earlier sweep",
+            method,
+            n_seen,
+            N_TRIALS,
+            N_TRIALS,
+            n_seen - N_TRIALS,
+        )
+
     best = max(trials, key=lambda t: float(t["val_probe_acc"]))
     scores: list[float] = sorted((float(t["val_probe_acc"]) for t in trials), reverse=True)
     payload = {
@@ -258,6 +282,9 @@ def save_best_params(
         "best_value": best["val_probe_acc"],
         "best_run": best["run"],
         "n_trials": len(trials),
+        # Recorded when they differ, so a reader can see that a selection was
+        # narrowed rather than having to rediscover it from the directory count.
+        "n_trial_dirs_seen": n_seen,
         "objective": "val_probe_acc",
         # The runner-up, recorded because on `supervised` the seven healthy
         # trials spanned 0.009 total. A winner that close to second place is a

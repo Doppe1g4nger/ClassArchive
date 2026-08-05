@@ -349,6 +349,34 @@ class TestTunedParamsSurviveTheSweep:
 
         assert save_best_params("vicreg", sweep_root=tmp_path, out_dir=tmp_path / "t") is None
 
+    def test_orphaned_trials_from_a_dead_sweep_do_not_widen_the_search(self, tmp_path):
+        """A sweep that dies leaves its run directories behind, and the sweep that
+        replaces it writes alongside them. `barlow` accumulated 14 for a 9-trial
+        budget. Selecting from all of them buys one method a wider search than the
+        contract allows -- the same violation check_sweep_budget refuses on the
+        command line, but invisible, because every file looks legitimate."""
+        from iqssl.cli.sweep import save_best_params
+
+        # Five orphans from the dead sweep, one of them the best score on disk.
+        for i, probe in enumerate([0.11, 0.12, 0.99, 0.10, 0.13]):
+            self._trial(tmp_path, "barlow", f"20260803-0{i}0000", probe, 1e-3)
+        # Then the nine that actually constitute the budget.
+        for i, probe in enumerate([0.14, 0.15, 0.16, 0.17, 0.18, 0.19, 0.20, 0.21, 0.22]):
+            self._trial(tmp_path, "barlow", f"20260804-0{i}0000", probe, 2e-3)
+
+        got = save_best_params("barlow", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert got["n_trials"] == N_TRIALS
+        assert got["n_trial_dirs_seen"] == 14
+        assert got["best_value"] == pytest.approx(0.22)  # not the orphaned 0.99
+
+    def test_a_budget_sized_sweep_is_untouched(self, tmp_path):
+        from iqssl.cli.sweep import save_best_params
+
+        for i in range(3):
+            self._trial(tmp_path, "simclr", f"2026080{i}-000000", 0.1 + i / 100, 1e-3)
+        got = save_best_params("simclr", sweep_root=tmp_path, out_dir=tmp_path / "tuned")
+        assert got["n_trials"] == got["n_trial_dirs_seen"] == 3
+
     def _full_cfg(self, root, method, stamp, args, search):
         from omegaconf import OmegaConf
 
