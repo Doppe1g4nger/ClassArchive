@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from iqssl.data.baselines import (
+    SUB_THRESHOLD_MARGIN_DB,
     SUB_THRESHOLD_SNR_DB,
     BaselineResult,
     bands_for,
@@ -129,10 +130,7 @@ def _evaluate_bands(
                     "band": list(band),
                     "ok": True,
                     "applicable": False,
-                    "advice": (
-                        f"not applicable: preset SNR range {snr_range} is entirely "
-                        f"at or above the {SUB_THRESHOLD_SNR_DB:g} dB fingerprinting floor"
-                    ),
+                    "advice": _not_applicable_advice(snr_range),
                 }
             )
             continue
@@ -152,8 +150,37 @@ def _evaluate_bands(
 
 
 def _has_sub_threshold(snr_range: tuple[float, float]) -> bool:
-    """Does the preset put any buffers below the fingerprinting floor?"""
-    return snr_range[0] < SUB_THRESHOLD_SNR_DB
+    """Does the preset reach far enough below the floor for the check to mean anything?
+
+    Not merely "below the floor": the floor is a knee, and buffers a decibel
+    under it are expected to score degraded rather than gone. See
+    :data:`SUB_THRESHOLD_MARGIN_DB`.
+    """
+    return snr_range[0] < SUB_THRESHOLD_SNR_DB - SUB_THRESHOLD_MARGIN_DB
+
+
+def _not_applicable_advice(snr_range: tuple[float, float]) -> str:
+    """Why the sub-threshold check was skipped -- and the two reasons differ.
+
+    A preset that never goes below the floor has nothing to measure. One that
+    dips just under it has something to measure but not the thing the check
+    asks about, and reporting the first reason for the second case would tell
+    the reader their preset has no low-SNR buffers when a tenth of it does.
+    """
+    floor, margin = SUB_THRESHOLD_SNR_DB, SUB_THRESHOLD_MARGIN_DB
+    if snr_range[0] >= floor:
+        return (
+            f"not applicable: preset SNR range {snr_range} is entirely "
+            f"at or above the {floor:g} dB fingerprinting floor"
+        )
+    return (
+        f"not applicable: the preset reaches {floor - snr_range[0]:.1f} dB below the "
+        f"{floor:g} dB floor, short of the {margin:g} dB this check needs. The floor is "
+        f"a knee, so buffers just under it should score degraded rather than gone, and "
+        f"a ceiling meant for buffers far below the knee would fail a preset behaving "
+        f"as designed. A rung that reaches deeper tests this for the whole ladder, "
+        f"since the generator is shared."
+    )
 
 
 def _advice(

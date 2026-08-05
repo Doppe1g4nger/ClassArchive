@@ -117,6 +117,41 @@ should have destroyed it -- which is exactly the kind of defect the difficulty
 gate exists to catch, and which no other check would notice.
 """
 
+SUB_THRESHOLD_MARGIN_DB = 3.0
+"""How far below the floor a preset must reach before the check means anything.
+
+The check's premise is that the fingerprint is *gone* below the floor. That holds
+well below the knee, not at it -- 12 dB is a knee, not a cliff, so a preset whose
+sub-threshold buffers sit a decibel or two under it should score *degraded*, not
+chance, and grading that against a ceiling meant for buffers far below the knee
+fails a preset behaving exactly as designed. This is the same error as grading
+`medium` against `easy`'s oracle band, one level down.
+
+It is not hypothetical. Rebuilt around the 12 dB floor, `medium` spans 9.6-25.3
+dB, so its entire sub-threshold population is a 2.4 dB sliver hugging the floor
+from underneath. It scored 0.411 against a 0.35 ceiling and the gate reported a
+generator leaking emitter identity. It is not:
+
+  * Emitter identity recovered from DC offset alone -- the mechanism the failure
+    advice names -- scores 0.0825 on medium's lowest-SNR slice against chance
+    0.0625. There is no per-emitter constant surviving the noise.
+  * A leak is SNR-*independent*, so it shows up as a floor: a level accuracy
+    stops falling below. Binned oracle accuracy has no floor in either preset.
+    `hard` reaches 7.6 dB and reads 0.139 / 0.176 / 0.220 / 0.196 / 0.282 /
+    0.314 across 7-19 dB -- its lowest bin is its lowest value, still falling.
+    `medium` reads 0.397 / 0.427 / 0.489 across 9-15 dB, crossing the floor with
+    no discontinuity at all. Both presets come from the same generator code, so
+    `hard` tests this property for the whole ladder, and passes at 0.174.
+
+Three decibels is a halving of signal-to-noise power -- a stated convention, not
+a measurement, and it does happen to fall between `medium`'s 2.4 dB and `hard`'s
+4.4 dB. Said plainly so a reader can judge it: the effect is that `medium` is
+reported as *not applicable* rather than failed, which makes the ladder's leak
+check rest entirely on `hard`. The alternative was widening medium's ceiling
+until it passed, and a band fitted to the number it is meant to judge certifies
+everything and means nothing.
+"""
+
 
 @dataclass
 class BaselineResult:

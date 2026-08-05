@@ -506,3 +506,54 @@ class TestDifficultyBands:
 
         assert bands_for(None) == TARGET_BANDS
         assert bands_for("nonesuch") == TARGET_BANDS
+
+
+class TestSubThresholdApplicability:
+    """The leak check only means something well below the knee.
+
+    12 dB is a knee, not a cliff. A preset dipping a decibel under it should
+    score degraded rather than gone, and grading that against a ceiling meant
+    for buffers far below the knee fails a preset behaving as designed --
+    the same error as grading `medium` against `easy`'s oracle band.
+    """
+
+    def test_a_preset_that_never_dips_below_the_floor_is_not_applicable(self):
+        from iqssl.cli.difficulty_report import _has_sub_threshold
+
+        assert not _has_sub_threshold((14.6, 30.3))  # easy, as built
+
+    def test_a_preset_that_only_grazes_the_floor_is_not_applicable(self):
+        """medium spans 9.6-25.3, so its whole sub-threshold population is a
+        2.4 dB sliver hugging the floor from underneath."""
+        from iqssl.cli.difficulty_report import _has_sub_threshold
+
+        assert not _has_sub_threshold((9.6, 25.3))
+
+    def test_a_preset_that_reaches_well_below_the_floor_is_applicable(self):
+        """hard spans 7.6-20.3 and so carries this check for the whole ladder."""
+        from iqssl.cli.difficulty_report import _has_sub_threshold
+
+        assert _has_sub_threshold((7.6, 20.3))
+
+    def test_the_two_skip_reasons_are_reported_differently(self):
+        """Telling a `medium` user their preset has no low-SNR buffers, when 13%
+        of it is below the floor, sends them to look at the wrong thing."""
+        from iqssl.cli.difficulty_report import _not_applicable_advice
+
+        never = _not_applicable_advice((14.6, 30.3))
+        grazes = _not_applicable_advice((9.6, 25.3))
+        assert "entirely" in never
+        assert "2.4 dB below" in grazes
+
+    def test_some_rung_of_the_ladder_still_runs_the_check(self):
+        """The margin makes the check skippable, and a ladder where every rung
+        skips it has silently dropped its only defence against the generator
+        leaking emitter identity."""
+        from iqssl.cli.difficulty_report import _has_sub_threshold
+        from iqssl.data.baselines import PRESET_BANDS
+        from iqssl.data.params import PRESETS
+
+        covered = [
+            name for name in PRESET_BANDS if _has_sub_threshold(PRESETS[name].channel.snr_db)
+        ]
+        assert covered, f"no rung reaches deep enough to test for a leak: {list(PRESET_BANDS)}"
