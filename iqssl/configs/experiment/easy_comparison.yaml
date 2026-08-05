@@ -1,0 +1,56 @@
+# @package _global_
+# The twelve-method comparison at CPU scale: `main_comparison`'s design on
+# `easy_long`'s budget.
+#
+# `main_comparison` is the thesis run and wants a GPU -- 100 epochs at batch 256
+# in bf16. This is the same experiment sized for the container this project
+# actually runs on, so the ranking it produces is real even though the absolute
+# numbers are not the thesis's.
+#
+# It exists as a named config rather than a pile of command-line overrides
+# because it *is* the record of what was run. A headline table whose settings
+# live only in a shell script cannot be reproduced from the repository.
+#
+# Two things differ from `easy_long`, and both are corrections rather than
+# preferences:
+#
+#   * `augment` is left at the root default, `standard`, where `easy_long` sets
+#     `light`. That was deliberate there: the viability gate asked whether the
+#     encoder *can* learn the task, and augmentation strength is a separate
+#     question that would have confounded it. Here it is the wrong choice twice
+#     over. Every method's learning rate was tuned under `standard` (see
+#     experiment/hpo.yaml), and augmentation strength moves the optimal rate for
+#     contrastive objectives, so tuning under one policy and reporting under
+#     another quietly weakens the one fairness claim this benchmark makes about
+#     hyperparameters. `standard` is also what `main_comparison` uses, so this
+#     stays comparable to the thesis run.
+#
+#   * `probe_every` stays 0. The online probe is a training-time diagnostic and
+#     the evaluation protocol is what the table is read from; paying for both on
+#     36 runs buys a number nothing reports.
+#
+# Evaluate WITHOUT --skip-finetune. `easy_long` recommends skipping it, and that
+# recommendation does not transfer: it was written for a gate whose question was
+# binary, where the linear probe alone answered it. Here the finetune column is
+# load-bearing. Tuning already showed `mae` last of eleven on val-probe accuracy
+# (0.1089), which is the known masked-autoencoder artifact -- they probe poorly
+# and finetune well -- and it is precisely why the protocol reports probe, kNN
+# and finetune rather than one of them. A table built from probe alone would
+# report that finding as a result about MAE's objective.
+#
+# 36 runs (12 methods x 3 seeds) at roughly 85 min pretraining plus ~20 min for
+# the full protocol: about 63 hours, method-major, one at a time. Serial is not
+# a scheduling convenience -- four cores shared between two runs halves the
+# steps/s of both, and a budget sized from a contended timing is how this
+# project once adopted the wrong encoder.
+experiment: easy_comparison
+data:
+  root: data/easy
+train:
+  epochs: 20
+  batch_size: 128
+  max_steps: 5600
+  device: cpu
+  log_every: 400
+  probe_every: 0
+  num_workers: 3
