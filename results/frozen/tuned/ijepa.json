@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "mask_ratio": 0.6976928057406203
+  },
+  "best_params": {
+    "base_lr": 0.0001244389086336001,
+    "optimizer": "adamw",
+    "weight_decay": 0.25463238272197664
+  },
+  "best_run": "outputs/hpo/ijepa/seed0/20260805-064940",
+  "best_value": 0.1263750046491623,
+  "method": "ijepa",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.12612499296665192
+}

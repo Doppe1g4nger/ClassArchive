@@ -1,0 +1,18 @@
+{
+  "best_method_args": {
+    "mask_ratio": 0.47931003711426445,
+    "top_k_layers": 4
+  },
+  "best_params": {
+    "base_lr": 0.00010619348907224648,
+    "optimizer": "adamw",
+    "weight_decay": 0.0022397004543485096
+  },
+  "best_run": "outputs/hpo/data2vec/seed0/20260805-140212",
+  "best_value": 0.12300000339746475,
+  "method": "data2vec",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.12150000035762787
+}

@@ -1,0 +1,15 @@
+{
+  "best_method_args": {},
+  "best_params": {
+    "base_lr": 0.001030582440887064,
+    "optimizer": "adamw",
+    "weight_decay": 0.1658242923643757
+  },
+  "best_run": "outputs/hpo/supervised/seed0/20260802-025055",
+  "best_value": 0.14149999618530273,
+  "method": "supervised",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.13837499916553497
+}

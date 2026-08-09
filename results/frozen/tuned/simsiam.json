@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "pred_hidden": 1024
+  },
+  "best_params": {
+    "base_lr": 0.012771120342654234,
+    "optimizer": "sgd",
+    "weight_decay": 1.0229780864183543e-05
+  },
+  "best_run": "outputs/hpo/simsiam/seed0/20260805-031102",
+  "best_value": 0.13587500154972076,
+  "method": "simsiam",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.13574999570846558
+}

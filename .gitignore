@@ -22,7 +22,15 @@ htmlcov/
 /data/
 /outputs*/
 /multirun/
-/results/
+# `/results/*`, not `/results/`, and the difference is the whole point: git
+# never descends into an excluded *directory*, so a negation underneath one can
+# never fire. `!/results/frozen/` sat below `/results/` for the project's whole
+# life and did nothing -- `git check-ignore results/frozen/x.json` reported it
+# ignored, and every measured result stayed out of the repository. Excluding the
+# directory's *contents* leaves the directory itself walkable, so the negation
+# below takes effect. tests/test_scaffold.py::test_frozen_results_are_committable
+# fails if this reverts.
+/results/*
 !/results/frozen/
 /wandb/
 # Written into the working directory by the Optuna sweeper at the end of a
@@ -37,6 +45,10 @@ htmlcov/
 *.log
 *.npy
 *.parquet
-!/results/frozen/*.parquet
+# `**/` and not `*/`: a gitignore `*` never crosses a `/`, so the original
+# `!/results/frozen/*.parquet` re-included only direct children of frozen/ and
+# left `frozen/comparison/headline.parquet` -- where the aggregator actually
+# writes -- ignored. `**/` matches zero or more directories, so both depths work.
+!/results/frozen/**/*.parquet
 
 .DS_Store

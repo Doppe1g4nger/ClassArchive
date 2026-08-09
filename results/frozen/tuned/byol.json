@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "momentum_start": 0.99011744050558
+  },
+  "best_params": {
+    "base_lr": 0.05764250715881184,
+    "optimizer": "lars",
+    "weight_decay": 1.9404819843699845e-07
+  },
+  "best_run": "outputs/hpo/byol/seed0/20260804-175520",
+  "best_value": 0.1287499964237213,
+  "method": "byol",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.1277499943971634
+}

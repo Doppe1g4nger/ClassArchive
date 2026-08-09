@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "lambd": 0.03989301725992405
+  },
+  "best_params": {
+    "base_lr": 0.18547444999820137,
+    "optimizer": "lars",
+    "weight_decay": 4.7349893044994796e-05
+  },
+  "best_run": "outputs/hpo/barlow/seed0/20260803-231420",
+  "best_value": 0.1313749998807907,
+  "method": "barlow",
+  "n_trial_dirs_seen": 14,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.12587499618530273
+}

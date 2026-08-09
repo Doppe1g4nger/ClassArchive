@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "temperature": 0.07804077349670102
+  },
+  "best_params": {
+    "base_lr": 0.053094587077576166,
+    "optimizer": "lars",
+    "weight_decay": 1.2110667473884348e-07
+  },
+  "best_run": "outputs/hpo/simclr/seed0/20260803-015526",
+  "best_value": 0.1251250058412552,
+  "method": "simclr",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.12462499737739563
+}

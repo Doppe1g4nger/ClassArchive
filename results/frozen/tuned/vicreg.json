@@ -1,0 +1,18 @@
+{
+  "best_method_args": {
+    "sim_coeff": 7.136388933477624,
+    "std_coeff": 48.70653383875688
+  },
+  "best_params": {
+    "base_lr": 0.05432979418408774,
+    "optimizer": "lars",
+    "weight_decay": 1.0577814989789257e-07
+  },
+  "best_run": "outputs/hpo/vicreg/seed0/20260804-133351",
+  "best_value": 0.12325000017881393,
+  "method": "vicreg",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.12312500178813934
+}

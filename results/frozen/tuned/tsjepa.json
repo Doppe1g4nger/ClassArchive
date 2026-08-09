@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "mask_ratio": 0.42279271883384906
+  },
+  "best_params": {
+    "base_lr": 0.00029084270739486906,
+    "optimizer": "adamw",
+    "weight_decay": 0.004279682461868474
+  },
+  "best_run": "outputs/hpo/tsjepa/seed0/20260805-125816",
+  "best_value": 0.12849999964237213,
+  "method": "tsjepa",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.12800000607967377
+}

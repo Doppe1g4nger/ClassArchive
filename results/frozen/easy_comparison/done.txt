@@ -1,0 +1,12 @@
+pretrain:supervised/seed0 outputs/easy_comparison/supervised/seed0/20260805-170151/
+eval:supervised/seed0
+pretrain:random/seed0 outputs/easy_comparison/random/seed0/20260807-223609/
+eval:random/seed0
+pretrain:simclr/seed0 outputs/easy_comparison/simclr/seed0/20260808-012016/
+eval:simclr/seed0
+pretrain:supcon/seed0 outputs/easy_comparison/supcon/seed0/20260808-140633/
+eval:supcon/seed0
+pretrain:barlow/seed0 outputs/easy_comparison/barlow/seed0/20260808-210229/
+eval:barlow/seed0
+pretrain:vicreg/seed0 outputs/easy_comparison/vicreg/seed0/20260809-030748/
+eval:vicreg/seed0

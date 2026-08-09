@@ -1,0 +1,36 @@
+{
+  "dataset_hash": "sha256:7799aaf3a0344ac55a0fe20293d421aecdfb726ac4bcfa9f62e5dd667821f2c9",
+  "lr_scaled": 0.026547293538788083,
+  "method": "simclr",
+  "method_class": "SimCLR",
+  "total_steps": 5600,
+  "train": {
+    "augment": "standard",
+    "base_lr": 0.053094587077576166,
+    "batch_size": 128,
+    "ckpt_every": 1000,
+    "device": "cpu",
+    "epochs": 20,
+    "grad_clip": 1.0,
+    "log_every": 400,
+    "max_steps": 5600,
+    "num_workers": 3,
+    "optimizer": "lars",
+    "precision": "fp32",
+    "probe_every": 0,
+    "seed": 0,
+    "warmup_frac": 0.1,
+    "weight_decay": 1.2110667473884348e-07,
+    "write_checkpoints": true
+  },
+  "view_spec": {
+    "mask_block_size": 4,
+    "mask_kind": null,
+    "mask_ratio": 0.75,
+    "n_views": 2,
+    "needs_labels": false,
+    "needs_mask": false,
+    "needs_unaugmented": false,
+    "symmetry": "symmetric"
+  }
+}

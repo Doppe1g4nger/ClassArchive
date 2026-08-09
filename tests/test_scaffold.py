@@ -62,6 +62,62 @@ def test_no_package_module_is_gitignored():
     )
 
 
+def test_frozen_results_are_committable():
+    """``results/frozen/`` must be the one part of ``results/`` git will accept.
+
+    Sibling of the test above, and the same failure with the opposite sign: that
+    one catches source being silently excluded, this one catches *measurements*
+    being silently excluded. Every result the project had -- eleven tuning
+    winners standing for 99 HPO trials, both ladder-gate certifications, and the
+    comparison's eval files -- lived only on an ephemeral container's disk,
+    because ``!/results/frozen/`` had been written under a ``/results/`` that
+    excluded the directory itself. Git does not descend into an excluded
+    directory, so the negation could never match; ``git ls-files results/``
+    returned nothing, and nothing anywhere said so.
+
+    Weights stay out regardless: they are megabytes each, they are regenerable
+    from a committed config plus a seed, and ``*.pt`` is what keeps the frozen
+    tree small enough to be worth committing at all.
+    """
+    committable = [
+        "results/frozen/tuned/simclr.json",
+        "results/frozen/easy_comparison/simclr/seed0/metrics.csv",
+        "results/frozen/comparison/headline.parquet",
+    ]
+    must_stay_ignored = [
+        "results/frozen/easy_comparison/simclr/seed0/checkpoint.pt",
+        "results/tuned/simclr.json",  # outside frozen/: still a working file
+    ]
+
+    def ignored(paths: list[str]) -> set[str]:
+        proc = subprocess.run(
+            ["git", "check-ignore", "--stdin"],
+            cwd=REPO_ROOT,
+            input="\n".join(paths),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 128:
+            pytest.skip("not a git working tree")
+        return set(proc.stdout.split())
+
+    wrongly_ignored = sorted(ignored(committable))
+    assert not wrongly_ignored, (
+        "these frozen-result paths are excluded by .gitignore, so measured "
+        "results would be silently dropped from every commit:\n  "
+        + "\n  ".join(wrongly_ignored)
+        + "\n\nThe usual cause is `/results/` (excludes the directory, so git "
+        "never descends and no negation under it can fire) where `/results/*` "
+        "is meant (excludes the contents, leaving the directory walkable)."
+    )
+
+    escaped = sorted(set(must_stay_ignored) - ignored(must_stay_ignored))
+    assert not escaped, "these must remain ignored but are now committable:\n  " + "\n  ".join(
+        escaped
+    )
+
+
 class TestRegistry:
     def test_register_and_get(self):
         reg: Registry = Registry("widgets")

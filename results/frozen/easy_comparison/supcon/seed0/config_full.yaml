@@ -1,0 +1,43 @@
+experiment: easy_comparison
+output_root: outputs
+train:
+  epochs: 20
+  batch_size: 128
+  base_lr: 0.6862787339483504
+  weight_decay: 1.9404819843699845e-07
+  optimizer: lars
+  warmup_frac: 0.1
+  grad_clip: 1.0
+  seed: 0
+  num_workers: 3
+  device: cpu
+  augment: standard
+  log_every: 400
+  probe_every: 0
+  max_steps: 5600
+encoder:
+  name: vit1d
+  args:
+    size: tiny
+    patch_size: 16
+    stem: conv
+method:
+  name: supcon
+  args:
+    temperature: 0.0558720252790009
+    proj_hidden: 2048
+    proj_dim: 128
+    pool: cls
+  train:
+    optimizer: lars
+    base_lr: 0.3
+    weight_decay: 1.0e-06
+  search:
+    train.base_lr: tag(log, interval(0.05, 1.0))
+    train.weight_decay: tag(log, interval(1e-7, 1e-4))
+    method.args.temperature: interval(0.05, 0.5)
+data:
+  root: data/easy
+  split_variant: iid
+  primary_label: emitter
+  crop_len: null

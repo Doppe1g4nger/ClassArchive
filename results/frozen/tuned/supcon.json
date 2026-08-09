@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "temperature": 0.0558720252790009
+  },
+  "best_params": {
+    "base_lr": 0.6862787339483504,
+    "optimizer": "lars",
+    "weight_decay": 1.9404819843699845e-07
+  },
+  "best_run": "outputs/hpo/supcon/seed0/20260803-041723",
+  "best_value": 0.16462500393390656,
+  "method": "supcon",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.16374999284744263
+}

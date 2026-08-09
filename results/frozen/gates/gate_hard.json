@@ -1,0 +1,95 @@
+{
+  "chance": 0.0625,
+  "checks": [
+    {
+      "advice": "",
+      "applicable": true,
+      "band": [
+        0.0,
+        0.6
+      ],
+      "check": "classical",
+      "ok": true,
+      "value": 0.08466666666666667
+    },
+    {
+      "advice": "",
+      "applicable": true,
+      "band": [
+        0.0,
+        0.25
+      ],
+      "check": "raw_linear",
+      "ok": true,
+      "value": 0.058333333333333334
+    },
+    {
+      "advice": "",
+      "applicable": true,
+      "band": [
+        0.3,
+        0.55
+      ],
+      "check": "supervised_cnn_high_snr",
+      "ok": true,
+      "value": 0.30666666666666664
+    },
+    {
+      "advice": "",
+      "applicable": true,
+      "band": [
+        0.0,
+        0.3
+      ],
+      "check": "supervised_cnn_sub_threshold",
+      "ok": true,
+      "value": 0.17418677859391396
+    }
+  ],
+  "dataset": "data/hard",
+  "dataset_hash": "sha256:08d52494128024a4f0bd896e1ab0c4c25f8abadc05f5e3a755d792035d5a5739",
+  "label": "emitter",
+  "n_classes": 16,
+  "passed": true,
+  "results": [
+    {
+      "accuracy": 0.08466666666666667,
+      "accuracy_high_snr": NaN,
+      "accuracy_sub_threshold": NaN,
+      "accuracy_train": NaN,
+      "feature_names": [
+        "dc_i",
+        "dc_q",
+        "dc_mag",
+        "circularity",
+        "papr_db",
+        "kurtosis",
+        "c40_mag",
+        "cfo_est",
+        "dphi_var",
+        "spectral_flatness",
+        "envelope_var"
+      ],
+      "name": "classical",
+      "notes": "11 closed-form features -> logistic regression"
+    },
+    {
+      "accuracy": 0.058333333333333334,
+      "accuracy_high_snr": NaN,
+      "accuracy_sub_threshold": NaN,
+      "accuracy_train": NaN,
+      "feature_names": [],
+      "name": "raw_linear",
+      "notes": "logistic regression on flattened raw IQ"
+    },
+    {
+      "accuracy": 0.23666666666666666,
+      "accuracy_high_snr": 0.30666666666666664,
+      "accuracy_sub_threshold": 0.17418677859391396,
+      "accuracy_train": 1.0,
+      "feature_names": [],
+      "name": "supervised_cnn",
+      "notes": "SmallCNN, 60 epochs, 16 classes"
+    }
+  ]
+}

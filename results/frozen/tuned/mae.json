@@ -1,0 +1,17 @@
+{
+  "best_method_args": {
+    "mask_ratio": 0.5902211574022149
+  },
+  "best_params": {
+    "base_lr": 0.0013908900381132845,
+    "optimizer": "adamw",
+    "weight_decay": 0.013772156415489933
+  },
+  "best_run": "outputs/hpo/mae/seed0/20260805-045039",
+  "best_value": 0.10887499898672104,
+  "method": "mae",
+  "n_trial_dirs_seen": 9,
+  "n_trials": 9,
+  "objective": "val_probe_acc",
+  "runner_up_value": 0.10537499934434891
+}
