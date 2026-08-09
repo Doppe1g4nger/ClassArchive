@@ -10,3 +10,4 @@ pretrain:barlow/seed0 outputs/easy_comparison/barlow/seed0/20260808-210229/
 eval:barlow/seed0
 pretrain:vicreg/seed0 outputs/easy_comparison/vicreg/seed0/20260809-030748/
 eval:vicreg/seed0
+pretrain:byol/seed0 outputs/easy_comparison/byol/seed0/20260809-135652/
