@@ -14,3 +14,4 @@ pretrain:byol/seed0 outputs/easy_comparison/byol/seed0/20260809-135652/
 eval:byol/seed0
 pretrain:simsiam/seed0 outputs/easy_comparison/simsiam/seed0/20260809-183143/
 eval:simsiam/seed0
+pretrain:mae/seed0 outputs/easy_comparison/mae/seed0/20260809-230053/
