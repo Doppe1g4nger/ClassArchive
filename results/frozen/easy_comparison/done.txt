@@ -16,3 +16,4 @@ pretrain:simsiam/seed0 outputs/easy_comparison/simsiam/seed0/20260809-183143/
 eval:simsiam/seed0
 pretrain:mae/seed0 outputs/easy_comparison/mae/seed0/20260809-230053/
 eval:mae/seed0
+pretrain:ijepa/seed0 outputs/easy_comparison/ijepa/seed0/20260810-012105/
