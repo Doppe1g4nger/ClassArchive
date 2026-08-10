@@ -1,0 +1,12 @@
+{
+  "cuda_available": false,
+  "device_name": "cpu",
+  "extra": {},
+  "git_branch": "claude/iq-signal-representation-learning-z5dtib",
+  "git_dirty": false,
+  "git_sha": "28fd19b6a3ebb7d2840a5e72592d1383a804dd7f",
+  "platform": "Linux-6.18.5-fc-v20-x86_64-with-glibc2.39",
+  "python": "3.11.15",
+  "torch_version": "2.13.0+cu130",
+  "world_size": 1
+}

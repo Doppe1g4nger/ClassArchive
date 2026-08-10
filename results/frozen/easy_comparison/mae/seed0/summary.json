@@ -1,0 +1,10 @@
+{
+  "compute/encoder_forwards": 2294.761518547464,
+  "compute/optimizer_steps": 5600.0,
+  "compute/peak_memory_gb": 0.0,
+  "compute/samples_seen": 716800.0,
+  "compute/teacher_forwards": 0.0,
+  "compute/tokens_seen": 18799200.0,
+  "compute/wall_clock_s": 4522.856261239999,
+  "final_loss": 0.3073734939098358
+}

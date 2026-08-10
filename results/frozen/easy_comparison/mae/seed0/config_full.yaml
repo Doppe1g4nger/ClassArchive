@@ -1,0 +1,43 @@
+experiment: easy_comparison
+output_root: outputs
+train:
+  epochs: 20
+  batch_size: 128
+  base_lr: 0.0013908900381132845
+  weight_decay: 0.013772156415489933
+  optimizer: adamw
+  warmup_frac: 0.1
+  grad_clip: 1.0
+  seed: 0
+  num_workers: 3
+  device: cpu
+  augment: standard
+  log_every: 400
+  probe_every: 0
+  max_steps: 5600
+encoder:
+  name: vit1d
+  args:
+    size: tiny
+    patch_size: 16
+    stem: conv
+method:
+  name: mae
+  args:
+    mask_ratio: 0.5902211574022149
+    decoder_dim: 192
+    decoder_depth: 4
+    normalize_targets: false
+  train:
+    optimizer: adamw
+    base_lr: 0.0015
+    weight_decay: 0.05
+  search:
+    train.base_lr: tag(log, interval(1e-4, 1e-2))
+    train.weight_decay: tag(log, interval(1e-3, 0.3))
+    method.args.mask_ratio: interval(0.5, 0.85)
+data:
+  root: data/easy
+  split_variant: iid
+  primary_label: emitter
+  crop_len: null
