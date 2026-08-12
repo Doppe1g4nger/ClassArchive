@@ -1,0 +1,36 @@
+{
+  "dataset_hash": "sha256:7799aaf3a0344ac55a0fe20293d421aecdfb726ac4bcfa9f62e5dd667821f2c9",
+  "lr_scaled": 5.309674453612324e-05,
+  "method": "data2vec",
+  "method_class": "Data2Vec",
+  "total_steps": 5600,
+  "train": {
+    "augment": "standard",
+    "base_lr": 0.00010619348907224648,
+    "batch_size": 128,
+    "ckpt_every": 1000,
+    "device": "cpu",
+    "epochs": 20,
+    "grad_clip": 1.0,
+    "log_every": 400,
+    "max_steps": 5600,
+    "num_workers": 3,
+    "optimizer": "adamw",
+    "precision": "fp32",
+    "probe_every": 0,
+    "seed": 0,
+    "warmup_frac": 0.1,
+    "weight_decay": 0.0022397004543485096,
+    "write_checkpoints": true
+  },
+  "view_spec": {
+    "mask_block_size": 4,
+    "mask_kind": "block",
+    "mask_ratio": 0.47931003711426445,
+    "n_views": 1,
+    "needs_labels": false,
+    "needs_mask": true,
+    "needs_unaugmented": false,
+    "symmetry": "asymmetric"
+  }
+}

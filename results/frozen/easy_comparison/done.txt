@@ -21,3 +21,4 @@ eval:ijepa/seed0
 pretrain:tsjepa/seed0 outputs/easy_comparison/tsjepa/seed0/20260812-083823/
 eval:tsjepa/seed0
 pretrain:data2vec/seed0 outputs/easy_comparison/data2vec/seed0/20260812-133814/
+eval:data2vec/seed0
